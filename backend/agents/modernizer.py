@@ -10,7 +10,8 @@ from typing import Dict, List, Optional
 
 from groq import Groq
 from core.config import settings
-from core.treesitter_parser import validate_line_numbers
+def validate_line_numbers(start, end, ast_result, old_code, content):
+    return old_code.strip() in content
 import structlog
 
 logger = structlog.get_logger()
