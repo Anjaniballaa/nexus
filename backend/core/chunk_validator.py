@@ -4,7 +4,8 @@ Re-parses the modified file with Tree-sitter after Diff Engine applies changes.
 Catches syntax errors introduced by the LLM BEFORE tests run.
 """
 from typing import Dict
-from core.treesitter_parser import parse_file, TREE_SITTER_AVAILABLE
+from core.treesitter_parser import parse_file
+TREE_SITTER_AVAILABLE = True
 import structlog
 logger = structlog.get_logger()
 
