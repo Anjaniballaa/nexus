@@ -29,7 +29,11 @@ export default function AnalysisPage() {
   } finally { setLoading(false) }
 }, [id])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { 
+  load()
+  const interval = setInterval(load, 3000)
+  return () => clearInterval(interval)
+}, [])
 
   // Poll while running
   useEffect(() => {
