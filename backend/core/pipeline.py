@@ -15,7 +15,7 @@ from sqlalchemy.future import select
 from core.config import settings
 from core.database import Analysis, ProposedChange
 from core.language_detector import detect_language
-from core.treesitter_parser import parse_file
+from core.treesitter_parser import parse_file, validate_ast_after_change
 from core.security_scanner import scan_file
 from core.diff_engine import apply_changes
 from core.chunk_validator import validate_modified_file

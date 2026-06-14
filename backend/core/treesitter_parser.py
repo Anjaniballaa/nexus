@@ -12,118 +12,69 @@ import structlog
 logger = structlog.get_logger()
 
 TREE_SITTER_AVAILABLE = False
-LANG_MODULES = {}
+LANG_MODULES: Dict[str, Any] = {}
+
+# Mapping: language name → (module_attr, display_name)
+# display_name is passed to Language(ptr, name) in tree-sitter 0.21.x
+_LANG_LOADERS = [
+    ("Python",              "tree_sitter_python",      "language",           "python"),
+    ("JavaScript",          "tree_sitter_javascript",  "language",           "javascript"),
+    ("TypeScript",          "tree_sitter_typescript",  "language_typescript","typescript"),
+    ("TSX",                 "tree_sitter_typescript",  "language_tsx",       "tsx"),
+    ("Java",                "tree_sitter_java",        "language",           "java"),
+    ("Go",                  "tree_sitter_go",          "language",           "go"),
+    ("Rust",                "tree_sitter_rust",        "language",           "rust"),
+    ("C++",                 "tree_sitter_cpp",         "language",           "cpp"),
+    ("C",                   "tree_sitter_c",           "language",           "c"),
+    ("Ruby",                "tree_sitter_ruby",        "language",           "ruby"),
+    ("PHP",                 "tree_sitter_php",         "language_php",       "php"),
+    ("Bash",                "tree_sitter_bash",        "language",           "bash"),
+    ("CSS",                 "tree_sitter_css",         "language",           "css"),
+    ("HTML",                "tree_sitter_html",        "language",           "html"),
+    ("JSON",                "tree_sitter_json",        "language",           "json"),
+    ("YAML",                "tree_sitter_yaml",        "language",           "yaml"),
+    ("TOML",                "tree_sitter_toml",        "language",           "toml"),
+    ("Scala",               "tree_sitter_scala",       "language",           "scala"),
+    ("Kotlin",              "tree_sitter_kotlin",      "language",           "kotlin"),
+    ("Haskell",             "tree_sitter_haskell",     "language",           "haskell"),
+    ("Elixir",              "tree_sitter_elixir",      "language",           "elixir"),
+    ("OCaml",               "tree_sitter_ocaml",       "language_ocaml",     "ocaml"),
+    ("OCaml Interface",     "tree_sitter_ocaml",       "language_ocaml_interface", "ocaml_interface"),
+    ("C#",                  "tree_sitter_c_sharp",     "language",           "c_sharp"),
+    ("Lua",                 "tree_sitter_lua",         "language",           "lua"),
+    ("Markdown",            "tree_sitter_markdown",    "language",           "markdown"),
+    ("Regex",               "tree_sitter_regex",       "language",           "regex"),
+    ("GraphQL",             "tree_sitter_graphql",     "language",           "graphql"),
+    ("Svelte",              "tree_sitter_svelte",      "language",           "svelte"),
+]
 
 try:
     from tree_sitter import Language, Parser
     TREE_SITTER_AVAILABLE = True
 
-    _loaders = {}
-
-    try:
-        import tree_sitter_python as m; _loaders["Python"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_javascript as m; _loaders["JavaScript"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_typescript as m
-        _loaders["TypeScript"] = m.language_typescript
-        _loaders["TSX"] = m.language_tsx
-    except Exception: pass
-    try:
-        import tree_sitter_java as m; _loaders["Java"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_go as m; _loaders["Go"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_rust as m; _loaders["Rust"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_cpp as m; _loaders["C++"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_c as m; _loaders["C"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_ruby as m; _loaders["Ruby"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_php as m; _loaders["PHP"] = m.language_php
-    except Exception: pass
-    try:
-        import tree_sitter_bash as m; _loaders["Bash"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_css as m; _loaders["CSS"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_html as m; _loaders["HTML"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_json as m; _loaders["JSON"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_yaml as m; _loaders["YAML"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_toml as m; _loaders["TOML"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_scala as m; _loaders["Scala"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_kotlin as m; _loaders["Kotlin"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_haskell as m; _loaders["Haskell"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_elixir as m; _loaders["Elixir"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_ocaml as m
-        _loaders["OCaml"] = m.language_ocaml
-        _loaders["OCaml Interface"] = m.language_ocaml_interface
-    except Exception: pass
-    try:
-        import tree_sitter_c_sharp as m; _loaders["C#"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_lua as m; _loaders["Lua"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_markdown as m
-        _loaders["Markdown"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_regex as m; _loaders["Regex"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_graphql as m; _loaders["GraphQL"] = m.language
-    except Exception: pass
-    try:
-        import tree_sitter_svelte as m; _loaders["Svelte"] = m.language
-    except Exception: pass
-
-    for lang_name, loader in _loaders.items():
+    for lang_name, module_name, attr_name, ts_name in _LANG_LOADERS:
         try:
-            lang_obj = loader()
-            # New packages return capsule directly — try wrapping first
-            try:
-                LANG_MODULES[lang_name] = Language(lang_obj)
-            except Exception:
-                # Some newer packages: lang_obj IS the language already
-                LANG_MODULES[lang_name] = lang_obj
+            mod = __import__(module_name)
+            loader_fn = getattr(mod, attr_name)
+            ptr = loader_fn()                  # returns an int (capsule pointer)
+            lang_obj = Language(ptr, ts_name)  # ← correct API for tree-sitter 0.21.x
+            LANG_MODULES[lang_name] = lang_obj
+        except ImportError:
+            pass  # package not installed — skip silently
         except Exception as e:
             logger.warning("tree_sitter_lang_failed", language=lang_name, error=str(e))
 
-    logger.info("tree_sitter_loaded", count=len(LANG_MODULES), languages=list(LANG_MODULES.keys()))
+    logger.info(
+        "tree_sitter_loaded",
+        count=len(LANG_MODULES),
+        languages=list(LANG_MODULES.keys()),
+    )
 
 except ImportError as e:
     logger.warning("tree_sitter_unavailable", error=str(e))
 
+
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def parse_file(language: str, content: str, file_path: str = "") -> Dict:
     """
@@ -132,174 +83,111 @@ def parse_file(language: str, content: str, file_path: str = "") -> Dict:
         ast_valid, functions, classes, imports,
         dependency_graph, file_metrics, raw_ast_available
     }
-    Falls back to regex-based extraction if tree-sitter unavailable.
+    Raises RuntimeError if tree-sitter is unavailable or the language is unsupported.
     """
-    if TREE_SITTER_AVAILABLE and language in LANG_MODULES:
-        return _parse_with_treesitter(language, content, file_path)
-    else:
-        logger.warning("treesitter_unavailable_fallback", language=language)
-        return _parse_with_regex_fallback(language, content, file_path)
+    if not TREE_SITTER_AVAILABLE:
+        raise RuntimeError(
+            "tree-sitter is not installed. Install it with: pip install tree-sitter"
+        )
+    if language not in LANG_MODULES:
+        raise RuntimeError(
+            f"Language '{language}' is not supported or its tree-sitter package is not installed. "
+            f"Available: {list(LANG_MODULES.keys())}"
+        )
+    return _parse_with_treesitter(language, content, file_path)
 
+
+# ── Core parser ───────────────────────────────────────────────────────────────
 
 def _parse_with_treesitter(language: str, content: str, file_path: str) -> Dict:
     lang = LANG_MODULES[language]
-    parser = Parser(lang)
+
+    parser = Parser()
+    parser.set_language(lang)
 
     tree = parser.parse(content.encode("utf-8"))
     root = tree.root_node
 
     ast_valid = not root.has_error
-    functions = []
-    classes = []
-    imports = []
+    functions: List[Dict] = []
+    classes:   List[Dict] = []
+    imports:   List[Dict] = []
 
     def walk(node, parent_class=None):
         ntype = node.type
 
-        # ── Function definitions ──────────────────────────────
+        # ── Function / method definitions ──────────────────────
         if ntype in (
-            "function_definition",       # Python
-            "function_declaration",      # JS/TS/Go
-            "method_definition",         # JS class methods
-            "method_declaration",        # Java
-            "arrow_function",            # JS arrow
-            "func_literal",              # Go
-            "fn_item",                   # Rust
+            "function_definition",   # Python
+            "function_declaration",  # JS / TS / Go
+            "method_definition",     # JS class methods
+            "method_declaration",    # Java
+            "arrow_function",        # JS arrow
+            "func_literal",          # Go
+            "fn_item",               # Rust
         ):
-            name = _extract_name(node, language)
-            start = node.start_point[0] + 1   # 1-indexed
+            name  = _extract_name(node, language)
+            start = node.start_point[0] + 1   # convert to 1-indexed
             end   = node.end_point[0] + 1
 
-            calls = _extract_calls(node, content)
-            params = _extract_params(node)
-            is_public = _is_public(name, node, language)
-
             functions.append({
-                "name": name,
-                "start_line": start,
-                "end_line": end,
-                "line_count": end - start + 1,
-                "calls": calls,
-                "params": params,
-                "is_public": is_public,
+                "name":         name,
+                "start_line":   start,
+                "end_line":     end,
+                "line_count":   end - start + 1,
+                "calls":        _extract_calls(node),
+                "params":       _extract_params(node),
+                "is_public":    _is_public(name, node, language),
                 "parent_class": parent_class,
             })
 
-        # ── Class definitions ──────────────────────────────────
+        # ── Class / struct definitions ─────────────────────────
         elif ntype in (
-            "class_definition",    # Python
-            "class_declaration",   # Java/JS/TS
-            "struct_item",         # Rust
-            "impl_item",           # Rust impl block
+            "class_definition",   # Python
+            "class_declaration",  # Java / JS / TS
+            "struct_item",        # Rust
+            "impl_item",          # Rust impl block
         ):
-            name = _extract_name(node, language)
+            name  = _extract_name(node, language)
             start = node.start_point[0] + 1
             end   = node.end_point[0] + 1
-            classes.append({
-                "name": name,
-                "start_line": start,
-                "end_line": end,
-            })
+            classes.append({"name": name, "start_line": start, "end_line": end})
             for child in node.children:
                 walk(child, parent_class=name)
-            return  # already recursed
+            return   # already recursed into children
 
         # ── Import statements ──────────────────────────────────
         elif ntype in (
             "import_statement",
             "import_from_statement",
             "import_declaration",
-            "require_call",  # custom for CJS
+            "require_call",
         ):
-            module = _extract_import_module(node, content)
+            module = _extract_import_module(node)
             if module:
-                imports.append({
-                    "module": module,
-                    "line": node.start_point[0] + 1,
-                })
+                imports.append({"module": module, "line": node.start_point[0] + 1})
 
         for child in node.children:
             walk(child, parent_class=parent_class)
 
     walk(root)
 
-    # Cross-file dependency graph: funcA → [funcB, funcC, ...]
     dep_graph = {f["name"]: f["calls"] for f in functions}
-
     lines = content.splitlines()
+
     return {
-        "ast_valid": ast_valid,
-        "functions": functions,
-        "classes": classes,
-        "imports": imports,
+        "ast_valid":      ast_valid,
+        "functions":      functions,
+        "classes":        classes,
+        "imports":        imports,
         "dependency_graph": dep_graph,
         "file_metrics": {
-            "total_lines": len(lines),
+            "total_lines":    len(lines),
             "function_count": len(functions),
-            "class_count": len(classes),
-            "import_count": len(imports),
+            "class_count":    len(classes),
+            "import_count":   len(imports),
         },
         "raw_ast_available": True,
-    }
-
-
-def _parse_with_regex_fallback(language: str, content: str, file_path: str) -> Dict:
-    """Regex-based fallback when tree-sitter unavailable (e.g., unsupported language)."""
-    lines = content.splitlines()
-    functions = []
-    imports = []
-
-    # Language-specific patterns
-    func_patterns = {
-        "Python":     r"^(async\s+)?def\s+(\w+)\s*\(",
-        "JavaScript": r"^(async\s+)?function\s+(\w+)\s*\(",
-        "TypeScript": r"^(async\s+)?function\s+(\w+)\s*\(",
-        "Java":       r"(public|private|protected|static|\s)+\w+\s+(\w+)\s*\(",
-        "Go":         r"^func\s+(\w+)\s*\(",
-        "Rust":       r"^(pub\s+)?fn\s+(\w+)\s*\(",
-    }
-    import_patterns = {
-        "Python":     r"^(import|from)\s+(\S+)",
-        "JavaScript": r"^(import|require\s*\()\s+['\"]?(\S+)",
-        "Java":       r"^import\s+([\w.]+)",
-        "Go":         r'"([\w./]+)"',
-    }
-
-    fpat = func_patterns.get(language, r"^(function|def|func)\s+(\w+)")
-    ipat = import_patterns.get(language, r"^import\s+(\S+)")
-
-    for i, line in enumerate(lines, 1):
-        if re.search(fpat, line.strip()):
-            m = re.search(r"(\w+)\s*\(", line)
-            if m:
-                functions.append({
-                    "name": m.group(1),
-                    "start_line": i,
-                    "end_line": i,
-                    "line_count": 1,
-                    "calls": [],
-                    "params": [],
-                    "is_public": not m.group(1).startswith("_"),
-                    "parent_class": None,
-                })
-        if re.search(ipat, line.strip()):
-            m = re.search(ipat, line.strip())
-            if m:
-                imports.append({"module": m.group(2) if m.lastindex >= 2 else m.group(1), "line": i})
-
-    return {
-        "ast_valid": True,
-        "functions": functions,
-        "classes": [],
-        "imports": imports,
-        "dependency_graph": {f["name"]: [] for f in functions},
-        "file_metrics": {
-            "total_lines": len(lines),
-            "function_count": len(functions),
-            "class_count": 0,
-            "import_count": len(imports),
-        },
-        "raw_ast_available": False,
     }
 
 
@@ -312,8 +200,9 @@ def _extract_name(node, language: str) -> str:
     return "<anonymous>"
 
 
-def _extract_calls(node, content: str) -> List[str]:
-    calls = []
+def _extract_calls(node) -> List[str]:
+    calls: List[str] = []
+
     def walk(n):
         if n.type == "call":
             func = n.child_by_field_name("function")
@@ -323,12 +212,13 @@ def _extract_calls(node, content: str) -> List[str]:
                     calls.append(name)
         for child in n.children:
             walk(child)
+
     walk(node)
     return calls
 
 
 def _extract_params(node) -> List[str]:
-    params = []
+    params: List[str] = []
     for child in node.children:
         if child.type in ("parameters", "formal_parameters", "parameter_list"):
             for p in child.children:
@@ -337,10 +227,9 @@ def _extract_params(node) -> List[str]:
     return params
 
 
-def _extract_import_module(node, content: str) -> Optional[str]:
+def _extract_import_module(node) -> Optional[str]:
     try:
         text = node.text.decode("utf-8")
-        # Extract module name from various import syntaxes
         m = re.search(r"""['"]([^'"]+)['"]""", text)
         if m:
             return m.group(1)
@@ -360,18 +249,18 @@ def _is_public(name: str, node, language: str) -> bool:
         return not name.startswith("_")
     if language in ("Java", "C++"):
         try:
-            text = node.text.decode("utf-8")[:50]
-            return "public" in text
+            return "public" in node.text.decode("utf-8")[:50]
         except Exception:
             return True
     if language == "Rust":
         try:
-            text = node.text.decode("utf-8")[:20]
-            return text.strip().startswith("pub")
+            return node.text.decode("utf-8")[:20].strip().startswith("pub")
         except Exception:
             return False
     return True
 
+
+# ── Line-number validator ─────────────────────────────────────────────────────
 
 def validate_line_numbers(
     proposed_line_start: int,
@@ -391,8 +280,6 @@ def validate_line_numbers(
         return False
     if proposed_line_start > proposed_line_end:
         return False
-
-    # Verify old_code exists verbatim somewhere in the file
     if old_code.strip() not in full_content:
         return False
 
