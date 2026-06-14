@@ -56,3 +56,6 @@ pytest-asyncio==0.23.7
 # Utilities
 aiofiles==24.1.0
 python-slugify==8.0.4
+
+psycopg2-binary
+asyncpg
