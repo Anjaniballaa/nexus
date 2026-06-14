@@ -1,11 +1,10 @@
-@"
 services:
   - type: web
     name: nexus-backend
     runtime: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port `$PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -52,4 +51,3 @@ databases:
     databaseName: nexus
     user: nexus
     plan: free
-"@ | Out-File -FilePath render.yaml -Encoding utf8
