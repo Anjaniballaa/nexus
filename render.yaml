@@ -1,58 +1,55 @@
-# Core
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-python-multipart==0.0.9
-python-dotenv==1.0.1
-pydantic==2.8.2
-pydantic-settings==2.3.4
+@"
+services:
+  - type: web
+    name: nexus-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port `$PORT
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: nexus-db
+          property: connectionString
+      - key: FRONTEND_URL
+        sync: false
+      - key: PYTHON_VERSION
+        value: "3.13.0"
 
-# Database - PostgreSQL async
-sqlalchemy==2.0.31
-asyncpg==0.29.0
-alembic==1.13.2
+  - type: static
+    name: nexus-frontend
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    envVars:
+      - key: VITE_API_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
 
-# Auth
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
-authlib==1.3.1
-itsdangerous==2.2.0
-httpx==0.27.0
-
-# LLM
-groq==0.9.0
-langchain==0.2.6
-langchain-groq==0.1.6
-
-# AST Parsing
-tree-sitter==0.21.3
-tree-sitter-python==0.21.0
-tree-sitter-javascript==0.21.0
-tree-sitter-java==0.21.0
-tree-sitter-typescript==0.21.1
-tree-sitter-go==0.21.0
-tree-sitter-rust==0.21.2
-tree-sitter-cpp==0.22.0
-tree-sitter-c==0.21.3
-tree-sitter-ruby==0.21.0
-
-# Security scanning
-bandit==1.7.9
-detect-secrets==1.5.0
-radon==6.0.1
-
-# GitHub
-PyGithub==2.3.0
-
-# Email
-resend==2.3.0
-
-# Logging
-structlog==24.2.0
-
-# Testing support
-pytest==8.2.2
-pytest-asyncio==0.23.7
-
-# Utilities
-aiofiles==24.1.0
-python-slugify==8.0.4
+databases:
+  - name: nexus-db
+    databaseName: nexus
+    user: nexus
+    plan: free
+"@ | Out-File -FilePath render.yaml -Encoding utf8
