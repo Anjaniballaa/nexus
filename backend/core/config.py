@@ -19,7 +19,12 @@ class Settings(BaseSettings):
     FRONTEND_URL: str = "http://localhost:5173"
     BACKEND_URL: str = "http://localhost:8000"
 
-    # Email
+    # Email — Resend (HTTPS, works on Render free tier)
+    # Gmail SMTP (port 465) is blocked by Render free tier
+    RESEND_API_KEY: str = ""
+    EMAIL_FROM: str = "NEXUS <onboarding@resend.dev>"
+
+    # Kept for backward compat — not used
     GMAIL_USER: str = ""
     GMAIL_PASSWORD: str = ""
 
