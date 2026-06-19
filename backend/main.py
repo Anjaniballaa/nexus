@@ -14,9 +14,7 @@ import json
 import asyncio
 import hmac
 import hashlib
-import tempfile
 import os
-import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -27,7 +25,6 @@ from fastapi import (
     Form, BackgroundTasks, WebSocket, WebSocketDisconnect, Request
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from pydantic import BaseModel
@@ -37,10 +34,9 @@ from core.database import (
     init_db, get_db, User, Analysis, ProposedChange, GitHubConnection
 )
 from core.auth import (
-    create_access_token, get_current_user,
+    create_access_token, get_current_user, decode_token,
     exchange_google_code, upsert_google_user,
     exchange_github_code, upsert_github_login_user, upsert_github_connection,
-    decode_token,
 )
 from core.observability import configure_logging, register_ws, unregister_ws, broadcast
 from core.pipeline import run_pipeline
@@ -90,7 +86,7 @@ class GitHubCallbackRequest(BaseModel):
 async def google_login():
     from fastapi.responses import RedirectResponse
     redirect_uri = f"{settings.BACKEND_URL}/auth/google/callback"
-    google_auth_url = (
+    url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={settings.GOOGLE_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}"
@@ -98,14 +94,11 @@ async def google_login():
         "&scope=openid%20email%20profile"
         "&access_type=offline"
     )
-    return RedirectResponse(url=google_auth_url)
+    return RedirectResponse(url=url)
 
 
 @app.get("/auth/google/callback")
-async def google_callback_get(
-    code: str,
-    db: AsyncSession = Depends(get_db),
-):
+async def google_callback_get(code: str, db: AsyncSession = Depends(get_db)):
     from fastapi.responses import RedirectResponse
     import urllib.parse
     try:
@@ -114,78 +107,65 @@ async def google_callback_get(
         user = await upsert_google_user(db, google_info)
         token = create_access_token(user.id)
         user_data = json.dumps({
-            "id": user.id,
-            "email": user.email,
-            "name": user.name,
-            "photo_url": user.photo_url,
-            "auth_provider": user.auth_provider,
+            "id": user.id, "email": user.email, "name": user.name,
+            "photo_url": user.photo_url, "auth_provider": user.auth_provider,
             "email_reports": user.email_reports,
-            "risk_threshold": user.risk_threshold,
-            "theme": user.theme,
+            "risk_threshold": user.risk_threshold, "theme": user.theme,
         })
-        frontend_url = (
-            f"{settings.FRONTEND_URL}/auth/callback"
-            f"?token={token}&user={urllib.parse.quote(user_data)}"
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/auth/callback"
+                f"?token={token}&user={urllib.parse.quote(user_data)}"
         )
-        return RedirectResponse(url=frontend_url)
     except Exception as e:
         logger.error("google_callback_failed", error=str(e))
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?error={str(e)}")
 
 
-# ── GitHub Login (initial, unauthenticated) ───────────────────────────────────
-
 @app.get("/auth/github/login")
 async def github_login():
-    """
-    Redirect to GitHub OAuth — LOGIN intent.
-    state = "login" so the unified callback knows this is a new login.
-    """
+    """Login intent — state=login."""
     from fastapi.responses import RedirectResponse
-    # Single callback URL — same one registered in your GitHub OAuth app
     redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
-    github_auth_url = (
+    url = (
         "https://github.com/login/oauth/authorize"
         f"?client_id={settings.GITHUB_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}"
         "&scope=repo%20user"
         "&state=login"
     )
-    return RedirectResponse(url=github_auth_url)
+    return RedirectResponse(url=url)
 
 
 @app.get("/auth/github/connect")
 async def github_connect_redirect(token: Optional[str] = None):
     """
-    Redirect to GitHub OAuth — CONNECT intent.
-    state = "connect:<jwt_token>" so the unified callback knows to link
-    the GitHub account to the currently logged-in user.
-    The frontend passes the JWT as a query param.
+    Connect intent — state=connect:<jwt>.
+    Frontend passes the JWT as ?token= query param.
+    Same callback URL as login — only ONE URL needed in GitHub OAuth app settings.
     """
     from fastapi.responses import RedirectResponse
     import urllib.parse
 
     if not token:
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?error=Not+authenticated")
-
-    # Validate token before redirecting
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/profile?error=Not+authenticated"
+        )
     user_id = decode_token(token)
     if not user_id:
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?error=Invalid+session")
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/profile?error=Invalid+or+expired+session"
+        )
 
-    # Encode intent + token in state
     state = f"connect:{token}"
-
-    # SAME redirect_uri as login — this is the ONE URL registered in GitHub OAuth app
     redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
-    github_auth_url = (
+    url = (
         "https://github.com/login/oauth/authorize"
         f"?client_id={settings.GITHUB_CLIENT_ID}"
         f"&redirect_uri={redirect_uri}"
         "&scope=repo%20user"
         f"&state={urllib.parse.quote(state)}"
     )
-    return RedirectResponse(url=github_auth_url)
+    return RedirectResponse(url=url)
 
 
 @app.get("/auth/github/callback")
@@ -196,16 +176,14 @@ async def github_callback_unified(
 ):
     """
     Single unified GitHub OAuth callback.
-    Handles both LOGIN and CONNECT based on state param:
-      - state == "login" or empty  → fresh GitHub login
-      - state starts with "connect:<token>" → connect to existing user
-    This means you only need ONE callback URL in your GitHub OAuth app:
-      https://nexus-1-dndd.onrender.com/auth/github/callback
+    state == "login" (or empty)   → fresh GitHub login
+    state starts "connect:<token>" → connect to existing user
+    Register ONLY this URL in your GitHub OAuth app:
+        https://nexus-1-dndd.onrender.com/auth/github/callback
     """
     from fastapi.responses import RedirectResponse
     import urllib.parse
 
-    # The redirect_uri sent to GitHub must match EXACTLY what's registered
     redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
 
     try:
@@ -216,62 +194,50 @@ async def github_callback_unified(
             url=f"{settings.FRONTEND_URL}/login?error=GitHub+authentication+failed"
         )
 
-    # ── CONNECT flow ──────────────────────────────────────────────────────────
+    # ── CONNECT flow ──────────────────────────────────────────────────────
     if state and state.startswith("connect:"):
-        token = state[len("connect:"):]
-        user_id = decode_token(token)
-
+        jwt_token = state[len("connect:"):]
+        user_id = decode_token(jwt_token)
         if not user_id:
             return RedirectResponse(
                 url=f"{settings.FRONTEND_URL}/profile?error=Session+expired.+Please+log+in+again."
             )
-
         result = await db.execute(select(User).where(User.id == user_id))
         user = result.scalar_one_or_none()
         if not user:
             return RedirectResponse(
                 url=f"{settings.FRONTEND_URL}/profile?error=User+not+found"
             )
-
         try:
             await upsert_github_connection(db, user.id, gh_info)
             await db.commit()
             logger.info("github_connected", user_id=user.id, github=gh_info.get("login"))
-            return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/profile?connected=true"
-            )
+            return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?connected=true")
         except Exception as e:
             logger.error("github_connect_failed", error=str(e))
             return RedirectResponse(
                 url=f"{settings.FRONTEND_URL}/profile?error=Connection+failed"
             )
 
-    # ── LOGIN flow ────────────────────────────────────────────────────────────
-    else:
-        try:
-            user = await upsert_github_login_user(db, gh_info)
-            token = create_access_token(user.id)
-            user_data = json.dumps({
-                "id": user.id,
-                "email": user.email,
-                "name": user.name,
-                "photo_url": user.photo_url,
-                "auth_provider": user.auth_provider,
-                "email_reports": user.email_reports,
-                "risk_threshold": user.risk_threshold,
-                "theme": user.theme,
-            })
-            frontend_url = (
-                f"{settings.FRONTEND_URL}/auth/callback"
+    # ── LOGIN flow ────────────────────────────────────────────────────────
+    try:
+        user = await upsert_github_login_user(db, gh_info)
+        token = create_access_token(user.id)
+        user_data = json.dumps({
+            "id": user.id, "email": user.email, "name": user.name,
+            "photo_url": user.photo_url, "auth_provider": user.auth_provider,
+            "email_reports": user.email_reports,
+            "risk_threshold": user.risk_threshold, "theme": user.theme,
+        })
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/auth/callback"
                 f"?token={token}&user={urllib.parse.quote(user_data)}"
-            )
-            logger.info("github_login_success", user_id=user.id)
-            return RedirectResponse(url=frontend_url)
-        except Exception as e:
-            logger.error("github_login_failed", error=str(e))
-            return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/login?error=GitHub+login+failed"
-            )
+        )
+    except Exception as e:
+        logger.error("github_login_failed", error=str(e))
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/login?error=GitHub+login+failed"
+        )
 
 
 @app.post("/auth/github/callback")
@@ -279,14 +245,13 @@ async def github_login_callback_post(
     body: GitHubCallbackRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """POST version for API clients (kept for compatibility)."""
+    """POST version for API clients."""
     try:
         gh_info = await exchange_github_code(body.code, body.redirect_uri)
         user = await upsert_github_login_user(db, gh_info)
         token = create_access_token(user.id)
         return {"access_token": token, "token_type": "bearer", "user": _user_to_dict(user)}
     except Exception as e:
-        logger.error("github_login_post_failed", error=str(e))
         raise HTTPException(400, f"GitHub authentication failed: {str(e)}")
 
 
@@ -382,18 +347,13 @@ async def list_repos(
         raise HTTPException(404, "No GitHub connection found")
     try:
         gh = Github(conn.access_token)
-        user = gh.get_user()
         repos = []
-        for repo in user.get_repos(sort="updated")[:50]:
+        for repo in gh.get_user().get_repos(sort="updated")[:50]:
             repos.append({
-                "id": repo.id,
-                "full_name": repo.full_name,
-                "name": repo.name,
-                "description": repo.description,
-                "language": repo.language,
+                "id": repo.id, "full_name": repo.full_name, "name": repo.name,
+                "description": repo.description, "language": repo.language,
                 "updated_at": repo.updated_at.isoformat() if repo.updated_at else None,
-                "private": repo.private,
-                "stars": repo.stargazers_count,
+                "private": repo.private, "stars": repo.stargazers_count,
                 "default_branch": repo.default_branch,
             })
         return {"repos": repos, "github_username": conn.github_username}
@@ -403,8 +363,7 @@ async def list_repos(
 
 @app.get("/github/repos/{owner}/{repo}/tree")
 async def get_repo_tree(
-    owner: str,
-    repo: str,
+    owner: str, repo: str,
     connection_id: Optional[str] = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -417,16 +376,15 @@ async def get_repo_tree(
         gh = Github(conn.access_token)
         repository = gh.get_repo(f"{owner}/{repo}")
         tree = repository.get_git_tree(repository.default_branch, recursive=True)
-        files = []
-        for item in tree.tree:
-            if item.type == "blob":
-                ext = Path(item.path).suffix.lower()
-                if ext in {
-                    ".py", ".js", ".ts", ".jsx", ".tsx",
-                    ".java", ".go", ".rs", ".cpp", ".c",
-                    ".rb", ".php", ".cs", ".kt", ".swift"
-                }:
-                    files.append({"path": item.path, "size": item.size, "url": item.url})
+        files = [
+            {"path": item.path, "size": item.size, "url": item.url}
+            for item in tree.tree
+            if item.type == "blob"
+            and Path(item.path).suffix.lower() in {
+                ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go",
+                ".rs", ".cpp", ".c", ".rb", ".php", ".cs", ".kt", ".swift"
+            }
+        ]
         return {
             "repo": f"{owner}/{repo}",
             "branch": repository.default_branch,
@@ -490,20 +448,16 @@ async def analyze_url(
     from github import Github, GithubException
     conn = await _get_github_conn(db, current_user.id, connection_id)
     token = conn.access_token if conn else None
-
     try:
         gh = Github(token) if token else Github()
         repo_name = _parse_repo_name(repo_url)
         repository = gh.get_repo(repo_name)
-
         selected_paths = None
         if file_paths and file_paths != "all":
             selected_paths = set(p.strip() for p in file_paths.split(",") if p.strip())
-
         files = await _fetch_repo_files(repository, selected_paths)
         if not files:
             raise HTTPException(400, "No supported files found in repository")
-
         analysis = Analysis(
             id=str(uuid.uuid4()),
             user_id=current_user.id,
@@ -514,7 +468,6 @@ async def analyze_url(
         )
         db.add(analysis)
         await db.commit()
-
         background_tasks.add_task(_run_analysis_bg, analysis.id, files, current_user)
         return {
             "analysis_id": analysis.id, "status": "pending",
@@ -539,7 +492,6 @@ async def get_analysis(
     analysis = result.scalar_one_or_none()
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-
     changes_result = await db.execute(
         select(ProposedChange).where(ProposedChange.analysis_id == analysis_id)
     )
@@ -585,23 +537,19 @@ async def approve_changes(
 ):
     result = await db.execute(
         select(Analysis).where(
-            Analysis.id == analysis_id,
-            Analysis.user_id == current_user.id,
+            Analysis.id == analysis_id, Analysis.user_id == current_user.id,
         )
     )
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Analysis not found")
-
     for change_id in body.change_ids:
         r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
         c = r.scalar_one_or_none()
         if c: c.status = "accepted"
-
     for change_id in (body.skip_ids or []):
         r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
         c = r.scalar_one_or_none()
         if c: c.status = "skipped"
-
     await db.commit()
     return {"message": f"{len(body.change_ids)} approved, {len(body.skip_ids or [])} skipped"}
 
@@ -620,33 +568,29 @@ async def commit_changes(
     )
     analysis = result.scalar_one_or_none()
     if not analysis or not analysis.github_repo:
-        raise HTTPException(400, "This analysis has no GitHub repo to commit to")
-
+        raise HTTPException(400, "No GitHub repo to commit to")
     changes_result = await db.execute(
         select(ProposedChange).where(
             ProposedChange.analysis_id == analysis_id,
             ProposedChange.status == "accepted",
         )
     )
-    accepted_changes = changes_result.scalars().all()
-    if not accepted_changes:
+    accepted = changes_result.scalars().all()
+    if not accepted:
         raise HTTPException(400, "No accepted changes to commit")
-
     conn = await _get_github_conn(db, current_user.id, analysis.github_connection_id)
     if not conn:
-        raise HTTPException(400, "No GitHub connection found for this analysis")
-
+        raise HTTPException(400, "No GitHub connection found")
     try:
         gh = Github(conn.access_token)
         repository = gh.get_repo(_parse_repo_name(analysis.github_repo))
         files_map: dict = {}
-        for change in accepted_changes:
+        for change in accepted:
             files_map.setdefault(change.file_path, []).append(change)
-
         committed = []
         for file_path, file_changes in files_map.items():
             file_obj = repository.get_contents(file_path)
-            content  = file_obj.decoded_content.decode("utf-8")
+            content = file_obj.decoded_content.decode("utf-8")
             from core.diff_engine import apply_changes
             modified = apply_changes(content, [_change_to_dict(c) for c in file_changes])["modified_file"]
             if modified == content:
@@ -660,7 +604,6 @@ async def commit_changes(
             repository.update_file(file_path, commit_msg, modified, file_obj.sha)
             for c in file_changes: c.status = "committed"
             committed.append(file_path)
-
         await db.commit()
         return {"message": f"Committed to {len(committed)} files", "committed_files": committed}
     except Exception as e:
@@ -682,21 +625,17 @@ async def download_analysis(
     analysis = result.scalar_one_or_none()
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-
     changes_result = await db.execute(
         select(ProposedChange).where(
-            ProposedChange.analysis_id == analysis_id,
-            ProposedChange.status == "accepted",
+            ProposedChange.analysis_id == analysis_id, ProposedChange.status == "accepted",
         )
     )
     accepted = changes_result.scalars().all()
     if not accepted:
         raise HTTPException(400, "No accepted changes to download")
-
     original = (analysis.full_report or {}).get("original_content", "")
     if not original:
         raise HTTPException(404, "Original content not stored. Please re-analyse.")
-
     from core.diff_engine import apply_changes
     modified = apply_changes(original, [_change_to_dict(c) for c in accepted])["modified_file"]
     return Response(
@@ -721,7 +660,6 @@ async def download_report(
     analysis = result.scalar_one_or_none()
     if not analysis:
         raise HTTPException(404, "Analysis not found")
-
     if format == "markdown":
         return Response(
             content=analysis.report_markdown or "No report available.",
@@ -793,7 +731,6 @@ async def github_webhook(
     expected = "sha256=" + mac.hexdigest()
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(403, "Invalid webhook signature")
-
     payload = json.loads(body)
     event = request.headers.get("X-GitHub-Event")
     if event == "pull_request" and payload.get("action") in ("opened", "synchronize"):
@@ -843,21 +780,74 @@ async def _run_analysis_bg(
     user: User,
     original_content: str = "",
 ):
+    """
+    Background task: runs pipeline then sends email report.
+    Every email decision point is logged — check Render backend logs
+    to see exactly why an email was or wasn't sent.
+    """
     from core.database import AsyncSessionLocal
     async with AsyncSessionLocal() as db:
         try:
             await run_pipeline(analysis_id, files, db)
+
             result = await db.execute(select(Analysis).where(Analysis.id == analysis_id))
             analysis = result.scalar_one_or_none()
+
+            # Store original content for download
             if analysis and original_content:
                 report_copy = dict(analysis.full_report or {})
                 report_copy["original_content"] = original_content
                 analysis.full_report = report_copy
                 await db.commit()
-            if analysis and user.email_reports and analysis.full_report:
-                report = analysis.full_report.get("report", {})
-                html = build_html_email(report, user.name, analysis.source_name)
-                send_report_email(user.email, user.name, analysis.source_name, html, analysis_id)
+
+            if not analysis:
+                logger.error("email_skipped_analysis_not_found", analysis_id=analysis_id)
+                return
+
+            # Log the email decision so you can diagnose in Render logs
+            logger.info(
+                "email_decision_check",
+                analysis_id=analysis_id,
+                user_email=user.email,
+                user_email_reports=user.email_reports,
+                analysis_status=analysis.status,
+                has_full_report=bool(analysis.full_report),
+            )
+
+            if not user.email_reports:
+                logger.warning(
+                    "email_skipped_user_disabled",
+                    analysis_id=analysis_id,
+                    user_email=user.email,
+                    hint="email_reports=False in DB — go to Settings and enable, or log out "
+                         "and sign in with Google to get a real email address",
+                )
+                return
+
+            if not analysis.full_report:
+                logger.warning(
+                    "email_skipped_no_report",
+                    analysis_id=analysis_id,
+                )
+                return
+
+            # Get report data — try nested "report" key first, fall back to full dict
+            report_data = analysis.full_report.get("report") or analysis.full_report
+
+            try:
+                html = build_html_email(report_data, user.name, analysis.source_name)
+            except Exception as e:
+                logger.error("email_html_build_failed", analysis_id=analysis_id, error=str(e))
+                return
+
+            send_report_email(
+                user.email,
+                user.name,
+                analysis.source_name,
+                html,
+                analysis_id,
+            )
+
         except Exception as e:
             logger.error("background_pipeline_failed", analysis_id=analysis_id, error=str(e))
 

@@ -7,24 +7,66 @@ import structlog
 logger = structlog.get_logger()
 
 
-def send_report_email(to_email: str, user_name: str, source_name: str, html_body: str, analysis_id: str) -> bool:
+def send_report_email(
+    to_email: str,
+    user_name: str,
+    source_name: str,
+    html_body: str,
+    analysis_id: str,
+) -> bool:
     """
     Send HTML analysis report email.
     Returns True on success, False on any failure.
-    Never sends to placeholder emails created for GitHub users with no public email.
+    Logs the exact reason for every skip/failure so you can diagnose in Render logs.
     """
-    # Guard: never send to placeholder emails
-    if not to_email or "@github.noemail" in to_email:
-        logger.info(
-            "email_skipped_no_real_address",
+
+    # Guard 1: never send to placeholder emails
+    if not to_email:
+        logger.warning("email_skipped_no_email", analysis_id=analysis_id)
+        return False
+
+    if "@github.noemail" in to_email:
+        logger.warning(
+            "email_skipped_placeholder_address",
             to=to_email,
             analysis_id=analysis_id,
+            hint="User has no real email — log out and sign in with Google to fix",
         )
         return False
 
-    if not settings.GMAIL_USER or not settings.GMAIL_PASSWORD:
-        logger.warning("gmail_not_configured")
+    # Guard 2: SMTP credentials must be configured
+    if not settings.GMAIL_USER:
+        logger.warning(
+            "email_skipped_no_gmail_user",
+            analysis_id=analysis_id,
+            hint="Set GMAIL_USER env var in Render backend environment",
+        )
         return False
+
+    if not settings.GMAIL_PASSWORD:
+        logger.warning(
+            "email_skipped_no_gmail_password",
+            analysis_id=analysis_id,
+            hint="Set GMAIL_PASSWORD env var (use Gmail App Password, not account password)",
+        )
+        return False
+
+    # Guard 3: html body must not be empty
+    if not html_body or len(html_body) < 50:
+        logger.warning(
+            "email_skipped_empty_body",
+            analysis_id=analysis_id,
+            body_len=len(html_body) if html_body else 0,
+        )
+        return False
+
+    logger.info(
+        "email_attempting_send",
+        to=to_email,
+        source=source_name,
+        analysis_id=analysis_id,
+        gmail_user=settings.GMAIL_USER,
+    )
 
     try:
         msg = MIMEMultipart("alternative")
@@ -37,9 +79,34 @@ def send_report_email(to_email: str, user_name: str, source_name: str, html_body
             server.login(settings.GMAIL_USER, settings.GMAIL_PASSWORD)
             server.sendmail(settings.GMAIL_USER, to_email, msg.as_string())
 
-        logger.info("email_sent", to=to_email, analysis_id=analysis_id)
+        logger.info(
+            "email_sent_successfully",
+            to=to_email,
+            analysis_id=analysis_id,
+        )
         return True
 
+    except smtplib.SMTPAuthenticationError as e:
+        logger.error(
+            "email_failed_auth",
+            error=str(e),
+            analysis_id=analysis_id,
+            hint="Gmail rejected login — use an App Password from myaccount.google.com/security, not your account password",
+        )
+        return False
+
+    except smtplib.SMTPException as e:
+        logger.error(
+            "email_failed_smtp",
+            error=str(e),
+            analysis_id=analysis_id,
+        )
+        return False
+
     except Exception as e:
-        logger.error("email_failed", error=str(e), to=to_email, analysis_id=analysis_id)
+        logger.error(
+            "email_failed_unexpected",
+            error=str(e),
+            analysis_id=analysis_id,
+        )
         return False
