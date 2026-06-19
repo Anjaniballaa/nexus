@@ -1,6 +1,13 @@
 """
 NEXUS — FastAPI Application Entry Point
 All routes, WebSocket, CORS, startup.
+
+GITHUB OAUTH STRATEGY:
+GitHub only allows ONE callback URL per OAuth app.
+We use a single callback /auth/github/callback for BOTH login and connect.
+The 'state' parameter encodes intent:
+  - state starts with "connect:" → connecting to existing account (token follows)
+  - state is empty / "login"    → fresh login
 """
 import uuid
 import json
@@ -33,6 +40,7 @@ from core.auth import (
     create_access_token, get_current_user,
     exchange_google_code, upsert_google_user,
     exchange_github_code, upsert_github_login_user, upsert_github_connection,
+    decode_token,
 )
 from core.observability import configure_logging, register_ws, unregister_ws, broadcast
 from core.pipeline import run_pipeline
@@ -93,19 +101,6 @@ async def google_login():
     return RedirectResponse(url=google_auth_url)
 
 
-@app.get("/auth/github/login")
-async def github_login():
-    from fastapi.responses import RedirectResponse
-    redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
-    github_auth_url = (
-        "https://github.com/login/oauth/authorize"
-        f"?client_id={settings.GITHUB_CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}"
-        "&scope=repo%20user"
-    )
-    return RedirectResponse(url=github_auth_url)
-
-
 @app.get("/auth/google/callback")
 async def google_callback_get(
     code: str,
@@ -138,92 +133,161 @@ async def google_callback_get(
         return RedirectResponse(url=f"{settings.FRONTEND_URL}/login?error={str(e)}")
 
 
+# ── GitHub Login (initial, unauthenticated) ───────────────────────────────────
+
+@app.get("/auth/github/login")
+async def github_login():
+    """
+    Redirect to GitHub OAuth — LOGIN intent.
+    state = "login" so the unified callback knows this is a new login.
+    """
+    from fastapi.responses import RedirectResponse
+    # Single callback URL — same one registered in your GitHub OAuth app
+    redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
+    github_auth_url = (
+        "https://github.com/login/oauth/authorize"
+        f"?client_id={settings.GITHUB_CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        "&scope=repo%20user"
+        "&state=login"
+    )
+    return RedirectResponse(url=github_auth_url)
+
+
+@app.get("/auth/github/connect")
+async def github_connect_redirect(token: Optional[str] = None):
+    """
+    Redirect to GitHub OAuth — CONNECT intent.
+    state = "connect:<jwt_token>" so the unified callback knows to link
+    the GitHub account to the currently logged-in user.
+    The frontend passes the JWT as a query param.
+    """
+    from fastapi.responses import RedirectResponse
+    import urllib.parse
+
+    if not token:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?error=Not+authenticated")
+
+    # Validate token before redirecting
+    user_id = decode_token(token)
+    if not user_id:
+        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?error=Invalid+session")
+
+    # Encode intent + token in state
+    state = f"connect:{token}"
+
+    # SAME redirect_uri as login — this is the ONE URL registered in GitHub OAuth app
+    redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
+    github_auth_url = (
+        "https://github.com/login/oauth/authorize"
+        f"?client_id={settings.GITHUB_CLIENT_ID}"
+        f"&redirect_uri={redirect_uri}"
+        "&scope=repo%20user"
+        f"&state={urllib.parse.quote(state)}"
+    )
+    return RedirectResponse(url=github_auth_url)
+
+
+@app.get("/auth/github/callback")
+async def github_callback_unified(
+    code: str,
+    state: Optional[str] = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Single unified GitHub OAuth callback.
+    Handles both LOGIN and CONNECT based on state param:
+      - state == "login" or empty  → fresh GitHub login
+      - state starts with "connect:<token>" → connect to existing user
+    This means you only need ONE callback URL in your GitHub OAuth app:
+      https://nexus-1-dndd.onrender.com/auth/github/callback
+    """
+    from fastapi.responses import RedirectResponse
+    import urllib.parse
+
+    # The redirect_uri sent to GitHub must match EXACTLY what's registered
+    redirect_uri = f"{settings.BACKEND_URL}/auth/github/callback"
+
+    try:
+        gh_info = await exchange_github_code(code, redirect_uri)
+    except Exception as e:
+        logger.error("github_code_exchange_failed", error=str(e))
+        return RedirectResponse(
+            url=f"{settings.FRONTEND_URL}/login?error=GitHub+authentication+failed"
+        )
+
+    # ── CONNECT flow ──────────────────────────────────────────────────────────
+    if state and state.startswith("connect:"):
+        token = state[len("connect:"):]
+        user_id = decode_token(token)
+
+        if not user_id:
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/profile?error=Session+expired.+Please+log+in+again."
+            )
+
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if not user:
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/profile?error=User+not+found"
+            )
+
+        try:
+            await upsert_github_connection(db, user.id, gh_info)
+            await db.commit()
+            logger.info("github_connected", user_id=user.id, github=gh_info.get("login"))
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/profile?connected=true"
+            )
+        except Exception as e:
+            logger.error("github_connect_failed", error=str(e))
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/profile?error=Connection+failed"
+            )
+
+    # ── LOGIN flow ────────────────────────────────────────────────────────────
+    else:
+        try:
+            user = await upsert_github_login_user(db, gh_info)
+            token = create_access_token(user.id)
+            user_data = json.dumps({
+                "id": user.id,
+                "email": user.email,
+                "name": user.name,
+                "photo_url": user.photo_url,
+                "auth_provider": user.auth_provider,
+                "email_reports": user.email_reports,
+                "risk_threshold": user.risk_threshold,
+                "theme": user.theme,
+            })
+            frontend_url = (
+                f"{settings.FRONTEND_URL}/auth/callback"
+                f"?token={token}&user={urllib.parse.quote(user_data)}"
+            )
+            logger.info("github_login_success", user_id=user.id)
+            return RedirectResponse(url=frontend_url)
+        except Exception as e:
+            logger.error("github_login_failed", error=str(e))
+            return RedirectResponse(
+                url=f"{settings.FRONTEND_URL}/login?error=GitHub+login+failed"
+            )
+
+
 @app.post("/auth/github/callback")
-async def github_login_callback(body: GitHubCallbackRequest, db: AsyncSession = Depends(get_db)):
-    """GitHub as primary login method."""
+async def github_login_callback_post(
+    body: GitHubCallbackRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """POST version for API clients (kept for compatibility)."""
     try:
         gh_info = await exchange_github_code(body.code, body.redirect_uri)
         user = await upsert_github_login_user(db, gh_info)
         token = create_access_token(user.id)
         return {"access_token": token, "token_type": "bearer", "user": _user_to_dict(user)}
     except Exception as e:
-        logger.error("github_login_failed", error=str(e))
+        logger.error("github_login_post_failed", error=str(e))
         raise HTTPException(400, f"GitHub authentication failed: {str(e)}")
-
-
-@app.get("/auth/github/connect")
-async def github_connect_redirect():
-    from fastapi.responses import RedirectResponse
-    redirect_uri = f"{settings.BACKEND_URL}/auth/github/connect/callback"
-    github_auth_url = (
-        "https://github.com/login/oauth/authorize"
-        f"?client_id={settings.GITHUB_CLIENT_ID}"
-        f"&redirect_uri={redirect_uri}"
-        "&scope=repo%20user"
-    )
-    return RedirectResponse(url=github_auth_url)
-
-
-@app.get("/auth/github/connect/callback")
-async def github_connect_callback(
-    code: str,
-    state: Optional[str] = None,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    GitHub OAuth connect callback.
-    The user token is passed as the 'state' parameter from the frontend
-    so we can identify which user is connecting.
-    FIX: previously grabbed most-recently-created user — critical security bug.
-    """
-    from fastapi.responses import RedirectResponse
-    try:
-        gh_info = await exchange_github_code(
-            code, f"{settings.BACKEND_URL}/auth/github/connect/callback"
-        )
-
-        user = None
-        # Prefer token passed as state param
-        if state:
-            from core.auth import decode_token
-            user_id = decode_token(state)
-            if user_id:
-                result = await db.execute(select(User).where(User.id == user_id))
-                user = result.scalar_one_or_none()
-
-        # Fallback: look up by GitHub email if user already exists
-        if not user:
-            github_email = gh_info.get("email") or f"{gh_info['login']}@github.noemail"
-            result = await db.execute(select(User).where(User.email == github_email))
-            user = result.scalar_one_or_none()
-
-        if not user:
-            return RedirectResponse(
-                url=f"{settings.FRONTEND_URL}/profile?error=User+not+found.+Please+log+in+first."
-            )
-
-        await upsert_github_connection(db, user.id, gh_info)
-        await db.commit()
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?connected=true")
-    except Exception as e:
-        logger.error("github_connect_callback_failed", error=str(e))
-        return RedirectResponse(url=f"{settings.FRONTEND_URL}/profile?error={str(e)}")
-
-
-@app.post("/auth/github/connect")
-async def connect_github(
-    body: GitHubCallbackRequest,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Connect an additional GitHub account to existing authenticated user."""
-    try:
-        gh_info = await exchange_github_code(body.code, body.redirect_uri)
-        conn = await upsert_github_connection(db, current_user.id, gh_info)
-        await db.commit()
-        return {"message": "GitHub connected", "github_username": conn.github_username}
-    except Exception as e:
-        raise HTTPException(400, f"GitHub connection failed: {str(e)}")
 
 
 @app.delete("/auth/github/{connection_id}")
@@ -259,7 +323,10 @@ class UpdateProfileRequest(BaseModel):
 
 
 @app.get("/me")
-async def get_me(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_me(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     result = await db.execute(
         select(GitHubConnection).where(GitHubConnection.user_id == current_user.id)
     )
@@ -275,16 +342,11 @@ async def update_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if body.name is not None:
-        current_user.name = body.name
-    if body.phone is not None:
-        current_user.phone = body.phone
-    if body.email_reports is not None:
-        current_user.email_reports = body.email_reports
-    if body.risk_threshold is not None:
-        current_user.risk_threshold = body.risk_threshold
-    if body.theme is not None:
-        current_user.theme = body.theme
+    if body.name is not None:           current_user.name = body.name
+    if body.phone is not None:          current_user.phone = body.phone
+    if body.email_reports is not None:  current_user.email_reports = body.email_reports
+    if body.risk_threshold is not None: current_user.risk_threshold = body.risk_threshold
+    if body.theme is not None:          current_user.theme = body.theme
     current_user.updated_at = datetime.utcnow()
     await db.commit()
     return _user_to_dict(current_user)
@@ -296,12 +358,9 @@ async def update_settings(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    if body.email_reports is not None:
-        current_user.email_reports = body.email_reports
-    if body.risk_threshold is not None:
-        current_user.risk_threshold = body.risk_threshold
-    if body.theme is not None:
-        current_user.theme = body.theme
+    if body.email_reports is not None:  current_user.email_reports = body.email_reports
+    if body.risk_threshold is not None: current_user.risk_threshold = body.risk_threshold
+    if body.theme is not None:          current_user.theme = body.theme
     current_user.updated_at = datetime.utcnow()
     await db.commit()
     return _user_to_dict(current_user)
@@ -409,7 +468,6 @@ async def analyze_file(
     db.add(analysis)
     await db.commit()
 
-    # FIX: correct arg order — (analysis_id, files, user, original_content)
     background_tasks.add_task(
         _run_analysis_bg,
         analysis.id,
@@ -417,7 +475,6 @@ async def analyze_file(
         current_user,
         text_content,
     )
-
     return {"analysis_id": analysis.id, "status": "pending", "source": file.filename}
 
 
@@ -458,18 +515,10 @@ async def analyze_url(
         db.add(analysis)
         await db.commit()
 
-        background_tasks.add_task(
-            _run_analysis_bg,
-            analysis.id,
-            files,
-            current_user,
-        )
-
+        background_tasks.add_task(_run_analysis_bg, analysis.id, files, current_user)
         return {
-            "analysis_id": analysis.id,
-            "status": "pending",
-            "source": repo_name,
-            "total_files": len(files),
+            "analysis_id": analysis.id, "status": "pending",
+            "source": repo_name, "total_files": len(files),
         }
     except GithubException as e:
         raise HTTPException(400, f"GitHub error: {e.data.get('message', str(e))}")
@@ -495,11 +544,7 @@ async def get_analysis(
         select(ProposedChange).where(ProposedChange.analysis_id == analysis_id)
     )
     changes = changes_result.scalars().all()
-
-    return {
-        **_analysis_to_dict(analysis),
-        "changes": [_change_to_dict(c) for c in changes],
-    }
+    return {**_analysis_to_dict(analysis), "changes": [_change_to_dict(c) for c in changes]}
 
 
 @app.get("/history")
@@ -544,24 +589,21 @@ async def approve_changes(
             Analysis.user_id == current_user.id,
         )
     )
-    analysis = result.scalar_one_or_none()
-    if not analysis:
+    if not result.scalar_one_or_none():
         raise HTTPException(404, "Analysis not found")
 
     for change_id in body.change_ids:
         r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
-        change = r.scalar_one_or_none()
-        if change:
-            change.status = "accepted"
+        c = r.scalar_one_or_none()
+        if c: c.status = "accepted"
 
     for change_id in (body.skip_ids or []):
         r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
-        change = r.scalar_one_or_none()
-        if change:
-            change.status = "skipped"
+        c = r.scalar_one_or_none()
+        if c: c.status = "skipped"
 
     await db.commit()
-    return {"message": f"{len(body.change_ids)} changes approved, {len(body.skip_ids or [])} skipped"}
+    return {"message": f"{len(body.change_ids)} approved, {len(body.skip_ids or [])} skipped"}
 
 
 @app.post("/analysis/{analysis_id}/commit")
@@ -573,8 +615,7 @@ async def commit_changes(
     from github import Github
     result = await db.execute(
         select(Analysis).where(
-            Analysis.id == analysis_id,
-            Analysis.user_id == current_user.id,
+            Analysis.id == analysis_id, Analysis.user_id == current_user.id,
         )
     )
     analysis = result.scalar_one_or_none()
@@ -597,9 +638,7 @@ async def commit_changes(
 
     try:
         gh = Github(conn.access_token)
-        repo_name = _parse_repo_name(analysis.github_repo)
-        repository = gh.get_repo(repo_name)
-
+        repository = gh.get_repo(_parse_repo_name(analysis.github_repo))
         files_map: dict = {}
         for change in accepted_changes:
             files_map.setdefault(change.file_path, []).append(change)
@@ -607,33 +646,23 @@ async def commit_changes(
         committed = []
         for file_path, file_changes in files_map.items():
             file_obj = repository.get_contents(file_path)
-            content = file_obj.decoded_content.decode("utf-8")
-
+            content  = file_obj.decoded_content.decode("utf-8")
             from core.diff_engine import apply_changes
-            result_diff = apply_changes(content, [_change_to_dict(c) for c in file_changes])
-            modified = result_diff["modified_file"]
-
+            modified = apply_changes(content, [_change_to_dict(c) for c in file_changes])["modified_file"]
             if modified == content:
                 continue
-
             change_types = list({c.issue_type for c in file_changes})
             commit_msg = (
                 f"[NEXUS] Modernize {file_path}: {len(file_changes)} changes\n\n"
                 + "\n".join(f"- {t}" for t in change_types)
-                + f"\n\nAnalyzed by NEXUS v3.0 | Analysis: {analysis_id[:8]}"
+                + f"\n\nNEXUS v3.0 | Analysis: {analysis_id[:8]}"
             )
-
             repository.update_file(file_path, commit_msg, modified, file_obj.sha)
-
-            for change in file_changes:
-                change.status = "committed"
+            for c in file_changes: c.status = "committed"
             committed.append(file_path)
 
         await db.commit()
-        return {
-            "message": f"Committed changes to {len(committed)} files",
-            "committed_files": committed,
-        }
+        return {"message": f"Committed to {len(committed)} files", "committed_files": committed}
     except Exception as e:
         raise HTTPException(500, f"Commit failed: {str(e)}")
 
@@ -647,8 +676,7 @@ async def download_analysis(
     from fastapi.responses import Response
     result = await db.execute(
         select(Analysis).where(
-            Analysis.id == analysis_id,
-            Analysis.user_id == current_user.id,
+            Analysis.id == analysis_id, Analysis.user_id == current_user.id,
         )
     )
     analysis = result.scalar_one_or_none()
@@ -665,62 +693,15 @@ async def download_analysis(
     if not accepted:
         raise HTTPException(400, "No accepted changes to download")
 
-    original = ""
-    if analysis.full_report:
-        original = analysis.full_report.get("original_content", "")
+    original = (analysis.full_report or {}).get("original_content", "")
     if not original:
-        raise HTTPException(404, "Original file content not stored. Please re-analyse the file.")
+        raise HTTPException(404, "Original content not stored. Please re-analyse.")
 
     from core.diff_engine import apply_changes
-    result_diff = apply_changes(original, [_change_to_dict(c) for c in accepted])
-    modified = result_diff["modified_file"]
-
-    filename = f"modernized_{analysis.source_name}"
+    modified = apply_changes(original, [_change_to_dict(c) for c in accepted])["modified_file"]
     return Response(
-        content=modified,
-        media_type="text/plain",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/analysis/{analysis_id}/download/{file_path:path}")
-async def download_modernized_file(
-    analysis_id: str,
-    file_path: str,
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    from fastapi.responses import Response
-    result = await db.execute(
-        select(Analysis).where(
-            Analysis.id == analysis_id,
-            Analysis.user_id == current_user.id,
-        )
-    )
-    analysis = result.scalar_one_or_none()
-    if not analysis:
-        raise HTTPException(404, "Analysis not found")
-
-    changes_result = await db.execute(
-        select(ProposedChange).where(
-            ProposedChange.analysis_id == analysis_id,
-            ProposedChange.file_path == file_path,
-            ProposedChange.status == "accepted",
-        )
-    )
-    changes = changes_result.scalars().all()
-    original = analysis.full_report.get("original_content", "") if analysis.full_report else ""
-    if not original:
-        raise HTTPException(404, "Original content not stored")
-
-    from core.diff_engine import apply_changes
-    result_diff = apply_changes(original, [_change_to_dict(c) for c in changes])
-
-    filename = Path(file_path).name
-    return Response(
-        content=result_diff["modified_file"],
-        media_type="text/plain",
-        headers={"Content-Disposition": f'attachment; filename="modernized_{filename}"'},
+        content=modified, media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="modernized_{analysis.source_name}"'},
     )
 
 
@@ -734,8 +715,7 @@ async def download_report(
     from fastapi.responses import Response
     result = await db.execute(
         select(Analysis).where(
-            Analysis.id == analysis_id,
-            Analysis.user_id == current_user.id,
+            Analysis.id == analysis_id, Analysis.user_id == current_user.id,
         )
     )
     analysis = result.scalar_one_or_none()
@@ -743,19 +723,16 @@ async def download_report(
         raise HTTPException(404, "Analysis not found")
 
     if format == "markdown":
-        content = analysis.report_markdown or "No report available."
         return Response(
-            content=content,
+            content=analysis.report_markdown or "No report available.",
             media_type="text/markdown",
             headers={"Content-Disposition": f'attachment; filename="nexus-report-{analysis_id[:8]}.md"'},
         )
-    else:
-        content = str(analysis.full_report or "No report available.")
-        return Response(
-            content=content,
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="nexus-report-{analysis_id[:8]}.json"'},
-        )
+    return Response(
+        content=str(analysis.full_report or "{}"),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="nexus-report-{analysis_id[:8]}.json"'},
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -768,10 +745,9 @@ async def approve_change(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
-    change = result.scalar_one_or_none()
-    if not change:
-        raise HTTPException(404, "Change not found")
+    r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
+    change = r.scalar_one_or_none()
+    if not change: raise HTTPException(404, "Change not found")
     change.status = "accepted"
     await db.commit()
     return {"message": "Change accepted", "id": change_id}
@@ -783,10 +759,9 @@ async def skip_change(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
-    change = result.scalar_one_or_none()
-    if not change:
-        raise HTTPException(404, "Change not found")
+    r = await db.execute(select(ProposedChange).where(ProposedChange.id == change_id))
+    change = r.scalar_one_or_none()
+    if not change: raise HTTPException(404, "Change not found")
     change.status = "skipped"
     await db.commit()
     return {"message": "Change skipped", "id": change_id}
@@ -798,15 +773,12 @@ async def get_changes(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(ProposedChange).where(ProposedChange.analysis_id == analysis_id)
-    )
-    changes = result.scalars().all()
-    return [_change_to_dict(c) for c in changes]
+    r = await db.execute(select(ProposedChange).where(ProposedChange.analysis_id == analysis_id))
+    return [_change_to_dict(c) for c in r.scalars().all()]
 
 
 # ════════════════════════════════════════════════════════════════════
-# WEBHOOK (CI/CD)
+# WEBHOOK
 # ════════════════════════════════════════════════════════════════════
 
 @app.post("/webhook/github")
@@ -817,41 +789,28 @@ async def github_webhook(
 ):
     body = await request.body()
     signature = request.headers.get("X-Hub-Signature-256", "")
-
-    # FIX: hmac.new() removed in Python 3.12 — use hmac.HMAC directly
-    mac = hmac.HMAC(
-        settings.WEBHOOK_SECRET.encode(),
-        body,
-        hashlib.sha256,
-    )
+    mac = hmac.HMAC(settings.WEBHOOK_SECRET.encode(), body, hashlib.sha256)
     expected = "sha256=" + mac.hexdigest()
-
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(403, "Invalid webhook signature")
 
     payload = json.loads(body)
     event = request.headers.get("X-GitHub-Event")
-
     if event == "pull_request" and payload.get("action") in ("opened", "synchronize"):
         pr = payload.get("pull_request", {})
         repo_url = pr.get("head", {}).get("repo", {}).get("clone_url", "")
-
         analysis = Analysis(
-            id=str(uuid.uuid4()),
-            input_mode="cicd",
-            source_name=repo_url,
-            github_repo=repo_url,
-            status="pending",
+            id=str(uuid.uuid4()), input_mode="cicd",
+            source_name=repo_url, github_repo=repo_url, status="pending",
         )
         db.add(analysis)
         await db.commit()
         logger.info("webhook_triggered", analysis_id=analysis.id, repo=repo_url)
-
     return {"status": "received"}
 
 
 # ════════════════════════════════════════════════════════════════════
-# WEBSOCKET (Live Agent Trace)
+# WEBSOCKET
 # ════════════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/{analysis_id}")
@@ -888,83 +847,63 @@ async def _run_analysis_bg(
     async with AsyncSessionLocal() as db:
         try:
             await run_pipeline(analysis_id, files, db)
-
             result = await db.execute(select(Analysis).where(Analysis.id == analysis_id))
             analysis = result.scalar_one_or_none()
-
             if analysis and original_content:
-                if not analysis.full_report:
-                    analysis.full_report = {}
-                report_copy = dict(analysis.full_report)
+                report_copy = dict(analysis.full_report or {})
                 report_copy["original_content"] = original_content
                 analysis.full_report = report_copy
                 await db.commit()
-
             if analysis and user.email_reports and analysis.full_report:
                 report = analysis.full_report.get("report", {})
                 html = build_html_email(report, user.name, analysis.source_name)
                 send_report_email(user.email, user.name, analysis.source_name, html, analysis_id)
-
         except Exception as e:
             logger.error("background_pipeline_failed", analysis_id=analysis_id, error=str(e))
 
 
 async def _fetch_repo_files(repository, selected_paths=None) -> list:
     supported_exts = {
-        ".py", ".js", ".ts", ".jsx", ".tsx",
-        ".java", ".go", ".rs", ".cpp", ".c",
-        ".rb", ".php", ".cs", ".kt", ".swift"
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs",
+        ".cpp", ".c", ".rb", ".php", ".cs", ".kt", ".swift"
     }
     files = []
     tree = repository.get_git_tree(repository.default_branch, recursive=True)
-
     for item in tree.tree:
-        if item.type != "blob":
-            continue
-        if selected_paths and item.path not in selected_paths:
-            continue
-        ext = Path(item.path).suffix.lower()
-        if ext not in supported_exts:
-            continue
-        if item.size and item.size > settings.MAX_FILE_SIZE_KB * 1024:
-            continue
-        if len(files) >= settings.MAX_REPO_FILES:
-            break
-
+        if item.type != "blob": continue
+        if selected_paths and item.path not in selected_paths: continue
+        if Path(item.path).suffix.lower() not in supported_exts: continue
+        if item.size and item.size > settings.MAX_FILE_SIZE_KB * 1024: continue
+        if len(files) >= settings.MAX_REPO_FILES: break
         path_lower = item.path.lower()
-        if any(skip in path_lower for skip in [
+        if any(s in path_lower for s in [
             "node_modules", "vendor", "dist/", "build/", ".min.",
             "package-lock", "yarn.lock", "__pycache__"
-        ]):
-            continue
-
+        ]): continue
         try:
-            file_content = repository.get_contents(item.path)
-            content = file_content.decoded_content.decode("utf-8", errors="replace")
-            files.append({"path": item.path, "content": content})
+            fc = repository.get_contents(item.path)
+            files.append({"path": item.path, "content": fc.decoded_content.decode("utf-8", errors="replace")})
         except Exception:
             continue
-
     return files
 
 
 async def _get_github_conn(db: AsyncSession, user_id: str, connection_id: Optional[str]):
     if connection_id:
-        result = await db.execute(
+        r = await db.execute(
             select(GitHubConnection).where(
                 GitHubConnection.id == connection_id,
                 GitHubConnection.user_id == user_id,
             )
         )
-        return result.scalar_one_or_none()
-    else:
-        result = await db.execute(
-            select(GitHubConnection).where(
-                GitHubConnection.user_id == user_id,
-                GitHubConnection.is_primary == True,
-            )
+        return r.scalar_one_or_none()
+    r = await db.execute(
+        select(GitHubConnection).where(
+            GitHubConnection.user_id == user_id,
+            GitHubConnection.is_primary == True,
         )
-        return result.scalar_one_or_none()
+    )
+    return r.scalar_one_or_none()
 
 
 def _parse_repo_name(url: str) -> str:
@@ -975,72 +914,48 @@ def _parse_repo_name(url: str) -> str:
 
 def _user_to_dict(user: User) -> dict:
     return {
-        "id": user.id,
-        "email": user.email,
-        "name": user.name,
-        "photo_url": user.photo_url,
-        "phone": user.phone,
-        "auth_provider": user.auth_provider,
-        "email_reports": user.email_reports,
-        "risk_threshold": user.risk_threshold,
-        "theme": user.theme,
+        "id": user.id, "email": user.email, "name": user.name,
+        "photo_url": user.photo_url, "phone": user.phone,
+        "auth_provider": user.auth_provider, "email_reports": user.email_reports,
+        "risk_threshold": user.risk_threshold, "theme": user.theme,
         "created_at": user.created_at.isoformat() if user.created_at else None,
     }
 
 
 def _conn_to_dict(conn: GitHubConnection) -> dict:
     return {
-        "id": conn.id,
-        "github_username": conn.github_username,
-        "avatar_url": conn.avatar_url,
-        "is_primary": conn.is_primary,
+        "id": conn.id, "github_username": conn.github_username,
+        "avatar_url": conn.avatar_url, "is_primary": conn.is_primary,
         "connected_at": conn.connected_at.isoformat() if conn.connected_at else None,
     }
 
 
 def _analysis_to_dict(a: Analysis) -> dict:
     return {
-        "id": a.id,
-        "status": a.status,
-        "input_mode": a.input_mode,
-        "source_name": a.source_name,
-        "github_repo": a.github_repo,
-        "language": a.language,
-        "era": a.era,
+        "id": a.id, "status": a.status, "input_mode": a.input_mode,
+        "source_name": a.source_name, "github_repo": a.github_repo,
+        "language": a.language, "era": a.era,
         "language_breakdown": a.language_breakdown,
-        "total_files": a.total_files,
-        "total_issues": a.total_issues,
-        "security_issues": a.security_issues,
-        "overall_risk": a.overall_risk,
+        "total_files": a.total_files, "total_issues": a.total_issues,
+        "security_issues": a.security_issues, "overall_risk": a.overall_risk,
         "minimality_score": a.minimality_score,
-        "complexity_before": a.complexity_before,
-        "complexity_after": a.complexity_after,
+        "complexity_before": a.complexity_before, "complexity_after": a.complexity_after,
         "confidence_score": a.confidence_score,
         "estimated_hours_saved": a.estimated_hours_saved,
-        "tests_passed": a.tests_passed,
-        "test_count": a.test_count,
+        "tests_passed": a.tests_passed, "test_count": a.test_count,
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "completed_at": a.completed_at.isoformat() if a.completed_at else None,
         "error_message": a.error_message,
-        "full_report": a.full_report,
-        "report_markdown": a.report_markdown,
+        "full_report": a.full_report, "report_markdown": a.report_markdown,
     }
 
 
 def _change_to_dict(c: ProposedChange) -> dict:
     return {
-        "id": c.id,
-        "file_path": c.file_path,
-        "issue_type": c.issue_type,
-        "description": c.description,
-        "old_code": c.old_code,
-        "new_code": c.new_code,
-        "line_start": c.line_start,
-        "line_end": c.line_end,
-        "risk_level": c.risk_level,
-        "risk_reason": c.risk_reason,
-        "confidence": c.confidence,
-        "priority": c.priority,
-        "callers": c.callers,
-        "status": c.status,
+        "id": c.id, "file_path": c.file_path, "issue_type": c.issue_type,
+        "description": c.description, "old_code": c.old_code, "new_code": c.new_code,
+        "line_start": c.line_start, "line_end": c.line_end,
+        "risk_level": c.risk_level, "risk_reason": c.risk_reason,
+        "confidence": c.confidence, "priority": c.priority,
+        "callers": c.callers, "status": c.status,
     }
