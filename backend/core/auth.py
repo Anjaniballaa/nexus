@@ -2,6 +2,14 @@
 NEXUS — Authentication Layer
 Google OAuth2 (primary) + GitHub OAuth2 (secondary/connections)
 JWT sessions stored server-side in DB. No localStorage on client.
+
+EMAIL STRATEGY:
+- Google login always has a real verified email → use it directly
+- GitHub login: if user has public email on GitHub → use it
+- GitHub login: if no public email → check if a Google account already
+  exists with the same GitHub username or display name → merge/link
+- GitHub login: if truly no match → create account but flag email as
+  unverified so email reports are disabled until user links Google
 """
 import uuid
 import httpx
@@ -21,6 +29,10 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 ALGORITHM = "HS256"
 
+# Sentinel suffix — used internally only, never shown to users as report destination
+NOEMAIL_SUFFIX = "@github.noemail"
+
+
 # ── JWT ───────────────────────────────────────────────────────────────────────
 
 def create_access_token(user_id: str) -> str:
@@ -38,6 +50,11 @@ def decode_token(token: str) -> Optional[str]:
         return payload.get("sub")
     except JWTError:
         return None
+
+
+def is_real_email(email: str) -> bool:
+    """Returns False for placeholder emails created when GitHub has no public email."""
+    return bool(email) and NOEMAIL_SUFFIX not in email
 
 
 # ── Current User ──────────────────────────────────────────────────────────────
@@ -74,7 +91,7 @@ async def get_current_user_optional(
 
 # ── Google OAuth ──────────────────────────────────────────────────────────────
 
-GOOGLE_TOKEN_URL   = "https://oauth2.googleapis.com/token"
+GOOGLE_TOKEN_URL    = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v3/userinfo"
 
 
@@ -104,6 +121,28 @@ async def upsert_google_user(db: AsyncSession, google_info: dict) -> User:
     user = result.scalar_one_or_none()
 
     if not user:
+        # Also check if there's a GitHub-created account with a placeholder email
+        # that might belong to this Google user (same display name)
+        # This merges accounts when user first signed up via GitHub then uses Google
+        name = google_info.get("name", "")
+        if name:
+            result2 = await db.execute(
+                select(User).where(
+                    User.name == name,
+                    User.auth_provider == "github",
+                )
+            )
+            existing_github_user = result2.scalar_one_or_none()
+            if existing_github_user and not is_real_email(existing_github_user.email):
+                # Upgrade the placeholder GitHub account to have the real Google email
+                existing_github_user.email = email
+                existing_github_user.photo_url = google_info.get("picture", existing_github_user.photo_url)
+                existing_github_user.auth_provider = "google"
+                existing_github_user.updated_at = datetime.utcnow()
+                await db.commit()
+                await db.refresh(existing_github_user)
+                return existing_github_user
+
         user = User(
             id=str(uuid.uuid4()),
             email=email,
@@ -113,7 +152,6 @@ async def upsert_google_user(db: AsyncSession, google_info: dict) -> User:
         )
         db.add(user)
     else:
-        # Update photo/name if changed
         user.photo_url = google_info.get("picture", user.photo_url)
         user.name = google_info.get("name", user.name)
         user.updated_at = datetime.utcnow()
@@ -125,8 +163,9 @@ async def upsert_google_user(db: AsyncSession, google_info: dict) -> User:
 
 # ── GitHub OAuth ──────────────────────────────────────────────────────────────
 
-GITHUB_TOKEN_URL   = "https://github.com/login/oauth/access_token"
+GITHUB_TOKEN_URL    = "https://github.com/login/oauth/access_token"
 GITHUB_USERINFO_URL = "https://api.github.com/user"
+GITHUB_EMAILS_URL   = "https://api.github.com/user/emails"
 
 
 async def exchange_github_code(code: str, redirect_uri: str) -> dict:
@@ -157,22 +196,96 @@ async def exchange_github_code(code: str, redirect_uri: str) -> dict:
         info.raise_for_status()
         user_info = info.json()
         user_info["_access_token"] = access_token
+
+        # If GitHub profile has no public email, try fetching verified emails
+        if not user_info.get("email"):
+            try:
+                emails_resp = await client.get(
+                    GITHUB_EMAILS_URL,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Accept": "application/vnd.github+json",
+                    },
+                )
+                if emails_resp.status_code == 200:
+                    emails = emails_resp.json()
+                    # Prefer primary verified email
+                    for e in emails:
+                        if e.get("primary") and e.get("verified"):
+                            user_info["email"] = e["email"]
+                            break
+                    # Fallback: any verified email
+                    if not user_info.get("email"):
+                        for e in emails:
+                            if e.get("verified"):
+                                user_info["email"] = e["email"]
+                                break
+            except Exception:
+                pass  # Non-fatal — will fall back to placeholder below
+
         return user_info
 
 
 async def upsert_github_login_user(db: AsyncSession, gh_info: dict) -> User:
-    """Used when someone logs in DIRECTLY with GitHub (not connecting to existing account)."""
-    github_email = gh_info.get("email") or f"{gh_info['login']}@github.noemail"
-    result = await db.execute(select(User).where(User.email == github_email))
+    """
+    Used when someone logs in DIRECTLY with GitHub.
+    Priority order for email:
+    1. Public GitHub email
+    2. Verified email from /user/emails API
+    3. Check if Google account exists with same name → link to it
+    4. Create new account with placeholder (email reports disabled)
+    """
+    github_email = gh_info.get("email")
+    github_login = gh_info["login"]
+    github_name  = gh_info.get("name") or github_login
+
+    # 1. Try to find existing user by real GitHub email
+    if github_email and is_real_email(github_email):
+        result = await db.execute(select(User).where(User.email == github_email))
+        user = result.scalar_one_or_none()
+        if user:
+            user.photo_url = gh_info.get("avatar_url", user.photo_url)
+            user.name = github_name or user.name
+            user.updated_at = datetime.utcnow()
+            await upsert_github_connection(db, user.id, gh_info)
+            await db.commit()
+            await db.refresh(user)
+            return user
+
+    # 2. Try to find existing Google account with same display name
+    # This handles: user signed up with Google first, now logging in via GitHub
+    if github_name:
+        result = await db.execute(
+            select(User).where(
+                User.name == github_name,
+                User.auth_provider == "google",
+            )
+        )
+        google_user = result.scalar_one_or_none()
+        if google_user:
+            # Link GitHub to the existing Google account silently
+            await upsert_github_connection(db, google_user.id, gh_info)
+            await db.commit()
+            await db.refresh(google_user)
+            return google_user
+
+    # 3. Check by placeholder email (returning GitHub-only user)
+    placeholder_email = f"{github_login}{NOEMAIL_SUFFIX}"
+    result = await db.execute(select(User).where(User.email == placeholder_email))
     user = result.scalar_one_or_none()
 
     if not user:
+        # 4. Create new account
+        # Use real email if we got one, otherwise placeholder
+        email_to_use = github_email if (github_email and is_real_email(github_email)) else placeholder_email
         user = User(
             id=str(uuid.uuid4()),
-            email=github_email,
-            name=gh_info.get("name") or gh_info["login"],
+            email=email_to_use,
+            name=github_name,
             photo_url=gh_info.get("avatar_url"),
             auth_provider="github",
+            # Disable email reports if we only have a placeholder email
+            email_reports=is_real_email(email_to_use),
         )
         db.add(user)
         await db.flush()
@@ -198,7 +311,6 @@ async def upsert_github_connection(
     conn = result.scalar_one_or_none()
 
     if not conn:
-        # Check if this is first connection → make it primary
         existing = await db.execute(
             select(GitHubConnection).where(GitHubConnection.user_id == user_id)
         )
@@ -215,8 +327,8 @@ async def upsert_github_connection(
         )
         db.add(conn)
     else:
-        conn.access_token = gh_info["_access_token"]
-        conn.avatar_url = gh_info.get("avatar_url")
+        conn.access_token    = gh_info["_access_token"]
+        conn.avatar_url      = gh_info.get("avatar_url")
         conn.github_username = gh_info["login"]
 
     await db.flush()

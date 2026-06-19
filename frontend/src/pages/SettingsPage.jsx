@@ -3,30 +3,41 @@ import { useAuth } from '../store/auth'
 import api from '../utils/api'
 import toast from 'react-hot-toast'
 
-function Toggle({ value, onChange }) {
+function Toggle({ value, onChange, disabled }) {
   return (
     <div
-      onClick={() => onChange(!value)}
+      onClick={() => !disabled && onChange(!value)}
       style={{
-        width: 44, height: 24, borderRadius: 12, cursor: 'pointer',
-        background: value ? 'var(--brand)' : 'var(--border)',
-        border: `1px solid ${value ? 'var(--brand-muted)' : 'var(--border-muted)'}`,
+        width: 44, height: 24, borderRadius: 12,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        background: value && !disabled ? 'var(--brand)' : 'var(--border)',
+        border: `1px solid ${value && !disabled ? 'var(--brand-muted)' : 'var(--border-muted)'}`,
         position: 'relative', transition: 'all 0.2s', flexShrink: 0,
+        opacity: disabled ? 0.5 : 1,
       }}
     >
       <div style={{
         width: 16, height: 16, borderRadius: '50%', background: '#fff',
         position: 'absolute', top: 3,
-        left: value ? 23 : 3,
+        left: value && !disabled ? 23 : 3,
         transition: 'left 0.2s',
       }} />
     </div>
   )
 }
 
+const isRealEmail = (email) =>
+  email && !email.includes('@github.noemail')
+
 export default function SettingsPage() {
   const { user, refreshUser } = useAuth()
-  const [emailReports, setEmailReports]   = useState(user?.email_reports ?? true)
+
+  const hasRealEmail = isRealEmail(user?.email)
+
+  const [emailReports, setEmailReports]   = useState(
+    // Force off if no real email
+    hasRealEmail ? (user?.email_reports ?? true) : false
+  )
   const [riskThreshold, setRiskThreshold] = useState(user?.risk_threshold || 'MEDIUM')
   const [theme, setTheme]                 = useState(user?.theme || 'dark')
   const [saving, setSaving]               = useState(false)
@@ -40,7 +51,7 @@ export default function SettingsPage() {
     setSaving(true)
     try {
       await api.patch('/me/settings', {
-        email_reports:  emailReports,
+        email_reports:  hasRealEmail ? emailReports : false,
         risk_threshold: riskThreshold,
         theme,
       })
@@ -54,11 +65,12 @@ export default function SettingsPage() {
     }
   }
 
-  const row = (children) => ({
+  const cardStyle = {
     background: 'var(--bg-surface)',
     border: '1px solid var(--border)',
-    borderRadius: 10, padding: 20,
-  })
+    borderRadius: 10,
+    padding: 20,
+  }
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: 560, margin: '0 auto' }}>
@@ -69,23 +81,72 @@ export default function SettingsPage() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
 
         {/* Email reports */}
-        <div style={row()}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <div>
+        <div style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
+            <div style={{ flex: 1 }}>
               <div style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 500 }}>
                 Email reports
               </div>
-              <div style={{ color: 'var(--text-faint)', fontSize: 12, marginTop: 2 }}>
-                Send HTML report to{' '}
-                <span style={{ color: 'var(--brand)' }}>{user?.email}</span> after each analysis
-              </div>
+
+              {hasRealEmail ? (
+                <div style={{ color: 'var(--text-faint)', fontSize: 12, marginTop: 2 }}>
+                  Send HTML report to{' '}
+                  <span style={{ color: 'var(--brand)' }}>{user?.email}</span> after each analysis
+                </div>
+              ) : (
+                // Warning shown when account has no real email (GitHub login with no public email)
+                <div style={{ marginTop: 6 }}>
+                  <div style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 8,
+                    padding: '10px 12px', borderRadius: 8,
+                    background: 'rgba(245,158,11,0.08)',
+                    border: '1px solid rgba(245,158,11,0.25)',
+                  }}>
+                    <span style={{ color: 'var(--amber)', fontSize: 14, flexShrink: 0, marginTop: 1 }}>⚠</span>
+                    <div>
+                      <div style={{ color: 'var(--amber)', fontSize: 12, fontWeight: 600, marginBottom: 4 }}>
+                        No verified email address
+                      </div>
+                      <div style={{ color: 'var(--text-faint)', fontSize: 11, lineHeight: 1.5 }}>
+                        Your GitHub account has no public email set, so email reports are disabled.
+                        To enable them, either:
+                      </div>
+                      <ul style={{ color: 'var(--text-faint)', fontSize: 11, lineHeight: 1.7, margin: '6px 0 0 0', paddingLeft: 16 }}>
+                        <li>
+                          <strong style={{ color: 'var(--text-secondary)' }}>Sign in with Google</strong> —
+                          log out and use <em>Continue with Google</em> with your Gmail account.
+                          Your accounts will be merged automatically.
+                        </li>
+                        <li>
+                          <strong style={{ color: 'var(--text-secondary)' }}>Set a public email on GitHub</strong> —
+                          go to{' '}
+                          <a
+                            href="https://github.com/settings/profile"
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: 'var(--brand)' }}
+                          >
+                            github.com/settings/profile
+                          </a>
+                          , add a public email, then log out and back in.
+                        </li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
-            <Toggle value={emailReports} onChange={setEmailReports} />
+
+            <Toggle
+              value={hasRealEmail ? emailReports : false}
+              onChange={setEmailReports}
+              disabled={!hasRealEmail}
+            />
           </div>
         </div>
 
         {/* Risk threshold */}
-        <div style={row()}>
+        <div style={cardStyle}>
           <div style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
             Risk threshold for alerts
           </div>
@@ -115,7 +176,7 @@ export default function SettingsPage() {
         </div>
 
         {/* Theme */}
-        <div style={row()}>
+        <div style={cardStyle}>
           <div style={{ color: 'var(--text-primary)', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
             Appearance
           </div>
@@ -148,13 +209,12 @@ export default function SettingsPage() {
 
         {/* Account */}
         <div style={{
-          background: 'var(--bg-surface)',
+          ...cardStyle,
           border: '1px solid var(--red-border)',
-          borderRadius: 10, padding: 20,
         }}>
           <div style={{
-            color: 'var(--red)', fontSize: 12,
-            fontWeight: 600, letterSpacing: '0.05em', marginBottom: 8,
+            color: 'var(--red)', fontSize: 12, fontWeight: 600,
+            letterSpacing: '0.05em', marginBottom: 8,
           }}>
             ACCOUNT
           </div>
