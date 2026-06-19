@@ -23,7 +23,7 @@ def load_dataset() -> Dict:
         with open(GOLDEN_DATASET_PATH, "r") as f:
             _dataset_cache = json.load(f)
     except FileNotFoundError:
-        logger.warning("golden_dataset_not_found")
+        logger.warning("golden_dataset_not_found", path=str(GOLDEN_DATASET_PATH))
         _dataset_cache = {}
     return _dataset_cache
 
@@ -42,7 +42,7 @@ def evaluate(
 
     if not patterns:
         return {
-            "confidence_score": 75,   # neutral if no golden data
+            "confidence_score": 75,
             "pattern_matches": 0,
             "total_changes": len(proposed_changes),
             "matched_patterns": [],
@@ -51,14 +51,13 @@ def evaluate(
 
     matches = []
     for change in proposed_changes:
-        if change.get("status") != "validated":
+        if change.get("status") not in ("validated", "manual_required"):
             continue
         old_code = change.get("old_code", "")
         new_code = change.get("new_code", "")
         issue_type = change.get("issue_type", "")
 
         for pattern in patterns:
-            # Check if this change matches a known golden transformation
             if _fuzzy_match(old_code, pattern.get("legacy", "")) and \
                _fuzzy_match(new_code, pattern.get("modern", "")):
                 matches.append({
@@ -75,12 +74,15 @@ def evaluate(
                 })
                 break
 
-    total_validated = len([c for c in proposed_changes if c.get("status") == "validated"])
+    total_validated = len([
+        c for c in proposed_changes
+        if c.get("status") in ("validated", "manual_required")
+    ])
     if total_validated == 0:
         confidence = 100
     else:
         confidence = int((len(matches) / total_validated) * 100)
-        # Partial credit for unmatched — they may still be valid for this specific codebase
+        # Partial credit for unmatched — may still be valid for this codebase
         confidence = max(60, confidence)
 
     return {
@@ -100,10 +102,23 @@ def _language_key(language: str) -> str:
         "Java": "java",
         "Go": "go",
         "Ruby": "ruby",
+        "Rust": "rust",
+        "C++": "cpp",
+        "C": "c",
+        "C#": "csharp",
+        "PHP": "php",
+        "Kotlin": "kotlin",
+        "Swift": "swift",
+        "Scala": "scala",
+        "R": "r",
+        "Bash": "bash",
+        "SQL": "sql",
     }
     return mapping.get(language, language.lower())
 
 
 def _fuzzy_match(a: str, b: str) -> bool:
     """Loose match — strips whitespace and compares normalized."""
+    if not a or not b:
+        return False
     return a.strip().replace(" ", "") == b.strip().replace(" ", "")

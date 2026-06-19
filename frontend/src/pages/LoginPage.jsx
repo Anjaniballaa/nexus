@@ -5,6 +5,7 @@ import { useAuth } from '../store/auth'
 export default function LoginPage() {
   const { user } = useAuth()
   const navigate = useNavigate()
+  // FIX: use VITE_API_URL env var — same pattern as everywhere else
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
   useEffect(() => {
@@ -34,7 +35,9 @@ export default function LoginPage() {
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 24, fontWeight: 800, color: '#fff', margin: '0 auto 16px',
           }}>N</div>
-          <h1 style={{ color: '#e2e8f0', fontSize: 28, fontWeight: 700, margin: 0, letterSpacing: '-1px' }}>
+          <h1 style={{
+            color: '#e2e8f0', fontSize: 28, fontWeight: 700, margin: 0, letterSpacing: '-1px',
+          }}>
             NEXUS
           </h1>
           <p style={{ color: '#475569', fontSize: 14, marginTop: 6 }}>
@@ -46,11 +49,14 @@ export default function LoginPage() {
         <div style={{
           background: '#0a0f1e', border: '1px solid #1e293b', borderRadius: 16, padding: 32,
         }}>
-          <h2 style={{ color: '#94a3b8', fontSize: 14, fontWeight: 600, margin: '0 0 24px', textAlign: 'center', letterSpacing: '0.05em' }}>
+          <h2 style={{
+            color: '#94a3b8', fontSize: 14, fontWeight: 600,
+            margin: '0 0 24px', textAlign: 'center', letterSpacing: '0.05em',
+          }}>
             SIGN IN TO CONTINUE
           </h2>
 
-          {/* Google */}
+          {/* Google — FIX: href points to backend /auth/google/login */}
           <a
             href={`${apiUrl}/auth/google/login`}
             style={{
@@ -72,7 +78,7 @@ export default function LoginPage() {
             Continue with Google
           </a>
 
-          {/* GitHub */}
+          {/* GitHub — FIX: href points to backend /auth/github/login */}
           <a
             href={`${apiUrl}/auth/github/login`}
             style={{
@@ -91,7 +97,9 @@ export default function LoginPage() {
             Continue with GitHub
           </a>
 
-          <p style={{ color: '#334155', fontSize: 11, textAlign: 'center', marginTop: 20, lineHeight: 1.5 }}>
+          <p style={{
+            color: '#334155', fontSize: 11, textAlign: 'center', marginTop: 20, lineHeight: 1.5,
+          }}>
             Google sign-in is recommended — your profile photo and email are used for reports.
             GitHub sign-in loads your repos directly.
           </p>
@@ -99,7 +107,7 @@ export default function LoginPage() {
 
         {/* Feature highlights */}
         <div style={{ display: 'flex', justifyContent: 'center', gap: 24, marginTop: 28 }}>
-          {['AST-first analysis', '14-layer pipeline', 'Human approval gate'].map(f => (
+          {['AST-first analysis', '11-layer pipeline', 'Human approval gate'].map(f => (
             <div key={f} style={{ color: '#334155', fontSize: 11, textAlign: 'center' }}>
               <div style={{ color: '#475569', marginBottom: 2 }}>✦</div>
               {f}

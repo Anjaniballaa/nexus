@@ -1,6 +1,6 @@
 """
 NEXUS — Main Pipeline Orchestrator
-Runs all 14 layers in sequence. Broadcasts progress via WebSocket.
+Runs all 11 active layers in sequence. Broadcasts progress via WebSocket.
 Called by the API routes.
 """
 import asyncio
@@ -38,12 +38,10 @@ async def run_pipeline(
     repo_path: Optional[str] = None,
 ) -> Dict:
     """
-    Run the full 14-layer NEXUS pipeline.
+    Run the full NEXUS pipeline.
     Updates the Analysis record in DB as it progresses.
     Broadcasts layer events via WebSocket.
     """
-
-    # Update status to running
     result = await db.execute(select(Analysis).where(Analysis.id == analysis_id))
     analysis = result.scalar_one_or_none()
     if not analysis:
@@ -87,6 +85,15 @@ async def _run_all_layers(
         "all_risks": [],
     }
 
+    # Aggregate metrics across all files
+    total_minimality = []
+    total_complexity_before = []
+    total_complexity_after = []
+    total_confidence = []
+    total_hours_saved = 0.0
+    any_regression = False
+    total_tests_passed = 0
+
     for file_info in files:
         file_path = file_info["path"]
         content = file_info["content"]
@@ -102,7 +109,6 @@ async def _run_all_layers(
         )
         all_results["files"].append(file_result)
 
-        # Accumulate language breakdown
         lang = file_result.get("language_info", {}).get("language", "Unknown")
         all_results["language_breakdown"][lang] = \
             all_results["language_breakdown"].get(lang, 0) + 1
@@ -114,6 +120,28 @@ async def _run_all_layers(
         all_results["all_changes"].extend(file_result.get("validated_changes", []))
         all_results["all_risks"].append(file_result.get("risk_result", {}))
 
+        # Aggregate metrics — collect from ALL files, not just first
+        diff_r = file_result.get("diff_result", {})
+        if diff_r.get("minimality_score") is not None:
+            total_minimality.append(diff_r["minimality_score"])
+
+        sec_r = file_result.get("security_result", {})
+        cc_before = sec_r.get("complexity_before", {}).get("avg_cyclomatic")
+        if cc_before is not None:
+            total_complexity_before.append(cc_before)
+
+        eval_r = file_result.get("evaluation_result", {})
+        if eval_r.get("confidence_score") is not None:
+            total_confidence.append(eval_r["confidence_score"])
+
+        risk_r = file_result.get("risk_result", {})
+        total_hours_saved += risk_r.get("estimated_hours_saved", 0) or 0
+
+        test_r = file_result.get("test_result", {})
+        if test_r.get("regression_detected"):
+            any_regression = True
+        total_tests_passed += test_r.get("modified_results", {}).get("passed", 0)
+
     # Convert language breakdown to percentages
     total_files = len(files)
     if total_files > 0:
@@ -122,31 +150,43 @@ async def _run_all_layers(
             for lang, count in all_results["language_breakdown"].items()
         }
 
-    # Update analysis record with summary
+    # Update analysis record with AGGREGATED metrics
     analysis.total_files = total_files
     analysis.total_issues = all_results["total_issues"]
     analysis.security_issues = all_results["total_security"]
     analysis.language_breakdown = all_results["language_breakdown"]
 
-    if files:
+    # Set language/era from first file
+    if all_results["files"]:
         first = all_results["files"][0]
         analysis.language = first.get("language_info", {}).get("language")
         analysis.era = first.get("language_info", {}).get("era")
-        analysis.minimality_score = first.get("diff_result", {}).get("minimality_score")
-        analysis.complexity_before = (
-            first.get("security_result", {})
-            .get("complexity_before", {})
-            .get("avg_cyclomatic")
-        )
-        analysis.tests_passed = not first.get("test_result", {}).get("regression_detected", False)
-        analysis.test_count = (
-            first.get("test_result", {})
-            .get("modified_results", {})
-            .get("passed", 0)
-        )
-        analysis.confidence_score = first.get("evaluation_result", {}).get("confidence_score")
-        analysis.estimated_hours_saved = first.get("risk_result", {}).get("estimated_hours_saved")
-        analysis.overall_risk = first.get("risk_result", {}).get("overall_risk")
+
+    # Aggregated scores (averages across all files)
+    analysis.minimality_score = (
+        round(sum(total_minimality) / len(total_minimality), 2)
+        if total_minimality else None
+    )
+    analysis.complexity_before = (
+        round(sum(total_complexity_before) / len(total_complexity_before), 2)
+        if total_complexity_before else None
+    )
+    analysis.confidence_score = (
+        round(sum(total_confidence) / len(total_confidence), 2)
+        if total_confidence else None
+    )
+    analysis.estimated_hours_saved = round(total_hours_saved, 1)
+    analysis.tests_passed = not any_regression
+    analysis.test_count = total_tests_passed
+
+    # Overall risk from aggregated risk results
+    risk_levels = [r.get("overall_risk") for r in all_results["all_risks"] if r.get("overall_risk")]
+    if "HIGH" in risk_levels:
+        analysis.overall_risk = "HIGH"
+    elif "MEDIUM" in risk_levels:
+        analysis.overall_risk = "MEDIUM"
+    elif risk_levels:
+        analysis.overall_risk = "LOW"
 
     await db.commit()
 
@@ -177,14 +217,15 @@ async def _process_single_file(
         language_info = detect_language(file_path, content)
         language = language_info["language"]
 
-    # Skip unknown languages
     if language == "Unknown":
         return {"file_path": file_path, "skipped": True, "reason": "Unknown language"}
 
     # ── Layer 2: AST Parsing ─────────────────────────────────────────────────
+    # FIX: correct arg order — parse_file(file_path, language_name, content, era)
     async with LayerTrace(analysis_id, "ast_parser", {"language": language}):
         ast_result = await asyncio.get_event_loop().run_in_executor(
-            None, parse_file, language, content, file_path
+            None, parse_file, file_path, language.lower(), content,
+            language_info.get("era")
         )
 
     # ── Layer 3: Security Scan ───────────────────────────────────────────────
@@ -251,14 +292,13 @@ async def _process_single_file(
             repo_path,
         )
 
-    # Block changes if regression detected
     if test_result.get("regression_detected"):
         await broadcast(analysis_id, {
             "type": "regression_blocked",
             "file": file_path,
             "message": "Regression detected — changes blocked until tests pass",
         })
-        validated_only = []   # Clear changes on regression
+        validated_only = []
 
     # ── Layer 9: Risk Scorer ──────────────────────────────────────────────────
     async with LayerTrace(analysis_id, "risk_scorer"):
@@ -282,6 +322,7 @@ async def _process_single_file(
             diff_result, test_result, risk_result, validation_result,
             evaluation_result, file_path, analysis_id,
         )
+
     # ── Save report to analysis ───────────────────────────────────────────────
     result_obj = await db.execute(select(Analysis).where(Analysis.id == analysis_id))
     analysis_obj = result_obj.scalar_one_or_none()
@@ -293,14 +334,18 @@ async def _process_single_file(
             "executive_summary": report.get("executive_summary", ""),
         }
         await db.commit()
-    # ── Save proposed changes to DB ───────────────────────────────────────────
+
+    # ── Save proposed changes to DB — including validation_failed ─────────────
     per_change_risk = {
         r.get("issue_type"): r
         for r in risk_result.get("per_change_risk", [])
     }
 
+    # FIX: also save "validation_failed" changes so users can see what failed
+    saveable_statuses = ("validated", "manual_required", "validation_failed")
+
     for change in raw_changes:
-        if change.get("status") not in ("validated", "manual_required"):
+        if change.get("status") not in saveable_statuses:
             continue
         risk_info = per_change_risk.get(change.get("issue_type"), {})
         db.add(ProposedChange(
@@ -308,7 +353,7 @@ async def _process_single_file(
             analysis_id=analysis_id,
             file_path=file_path,
             issue_type=change.get("issue_type", "unknown"),
-            description=change.get("reason", ""),
+            description=change.get("reason", "") or change.get("description", ""),
             old_code=change.get("old_code", ""),
             new_code=change.get("new_code", ""),
             line_start=change.get("line_start", 0),

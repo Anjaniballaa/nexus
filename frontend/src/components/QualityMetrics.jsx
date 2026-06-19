@@ -4,47 +4,49 @@ export default function QualityMetrics({ analysis }) {
   const {
     complexity_before, complexity_after,
     estimated_hours_saved, confidence_score,
-    minimality_score, tests_passed,
+    minimality_score, tests_passed, test_count,
     total_issues, security_issues,
   } = analysis
 
   const cards = [
-    complexity_before != null && complexity_after != null && {
-      label: 'Complexity Score',
-      before: complexity_before?.toFixed(1),
-      after: complexity_after?.toFixed(1),
-      improved: complexity_after < complexity_before,
-      unit: '',
+    complexity_before != null && {
+      label: 'Complexity',
+      before: typeof complexity_before === 'number' ? complexity_before.toFixed(1) : complexity_before,
+      after: complexity_after != null ? (typeof complexity_after === 'number' ? complexity_after.toFixed(1) : complexity_after) : null,
+      improved: complexity_after != null && complexity_after < complexity_before,
     },
     estimated_hours_saved != null && {
       label: 'Time Saved',
-      value: `~${estimated_hours_saved.toFixed(1)}h`,
+      // estimated_hours_saved is already a number like 2.5
+      value: `~${typeof estimated_hours_saved === 'number' ? estimated_hours_saved.toFixed(1) : estimated_hours_saved}h`,
       sub: 'manual effort avoided',
       color: '#10b981',
     },
     confidence_score != null && {
       label: 'Confidence',
-      value: `${Math.round(confidence_score * 100)}%`,
+      // FIX: confidence_score is already 0-100 integer from backend — do NOT multiply by 100
+      value: `${Math.round(Number(confidence_score))}%`,
       sub: 'modernization accuracy',
       color: '#6366f1',
     },
     minimality_score != null && {
       label: 'Minimality',
-      value: `${Math.round(minimality_score * 100)}%`,
-      sub: 'surgical changes only',
+      // FIX: minimality_score is already 0-100 from diff engine — do NOT multiply by 100
+      value: `${Math.round(Number(minimality_score))}%`,
+      sub: 'file unchanged',
       color: '#8b5cf6',
     },
     tests_passed != null && {
       label: 'Tests',
       value: tests_passed ? 'PASS' : 'FAIL',
-      sub: 'regression check',
+      sub: test_count != null ? `${test_count} passed` : 'regression check',
       color: tests_passed ? '#10b981' : '#ef4444',
     },
     {
       label: 'Issues Found',
       value: total_issues || 0,
       sub: `${security_issues || 0} security`,
-      color: security_issues > 0 ? '#ef4444' : '#64748b',
+      color: (security_issues || 0) > 0 ? '#ef4444' : '#64748b',
     },
   ].filter(Boolean)
 
@@ -62,14 +64,20 @@ export default function QualityMetrics({ analysis }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                 <span style={{ color: '#64748b', fontSize: 18, fontWeight: 700 }}>{card.before}</span>
                 <span style={{ color: '#334155', fontSize: 12 }}>→</span>
-                <span style={{
-                  fontSize: 18, fontWeight: 700,
-                  color: card.improved ? '#10b981' : '#ef4444',
-                }}>{card.after}</span>
+                {card.after != null ? (
+                  <span style={{
+                    fontSize: 18, fontWeight: 700,
+                    color: card.improved ? '#10b981' : '#ef4444',
+                  }}>{card.after}</span>
+                ) : (
+                  <span style={{ color: '#475569', fontSize: 12 }}>—</span>
+                )}
               </div>
-              <div style={{ color: '#334155', fontSize: 10, marginTop: 2 }}>
-                {card.improved ? '↓ improved' : '↑ no change'}
-              </div>
+              {card.after != null && (
+                <div style={{ color: '#334155', fontSize: 10, marginTop: 2 }}>
+                  {card.improved ? '↓ improved' : '— unchanged'}
+                </div>
+              )}
             </div>
           ) : (
             <div>

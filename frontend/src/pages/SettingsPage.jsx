@@ -28,19 +28,28 @@ export default function SettingsPage() {
   const { user, refreshUser } = useAuth()
   const [emailReports, setEmailReports] = useState(user?.email_reports ?? true)
   const [riskThreshold, setRiskThreshold] = useState(user?.risk_threshold || 'MEDIUM')
+  // FIX: declare theme state (was referenced but never declared — caused ReferenceError crash)
+  const [theme, setTheme] = useState(user?.theme || 'dark')
   const [saving, setSaving] = useState(false)
 
   const save = async () => {
-  setSaving(true)
-  try{
-    await api.patch('/me/settings', { email_reports: emailReports, risk_threshold: riskThreshold })
-    document.documentElement.setAttribute('data-theme', theme)
-    await refreshUser()
-    toast.success('Settings saved')
-  } catch {
-    toast.error('Save failed')
-  } finally { setSaving(false) }
-}
+    setSaving(true)
+    try {
+      await api.patch('/me/settings', {
+        email_reports: emailReports,
+        risk_threshold: riskThreshold,
+        theme: theme,
+      })
+      // FIX: apply theme to document after successful save
+      document.documentElement.setAttribute('data-theme', theme)
+      await refreshUser()
+      toast.success('Settings saved')
+    } catch {
+      toast.error('Save failed')
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div style={{ padding: '24px 32px', maxWidth: 560, margin: '0 auto' }}>
@@ -67,7 +76,7 @@ export default function SettingsPage() {
             Risk threshold for alerts
           </div>
           <div style={{ color: '#475569', fontSize: 12, marginBottom: 12 }}>
-            Only flag changes at or above this risk level for your attention
+            Only flag changes at or above this risk level
           </div>
           <div style={{ display: 'flex', gap: 6 }}>
             {['LOW', 'MEDIUM', 'HIGH'].map(r => (
@@ -76,7 +85,9 @@ export default function SettingsPage() {
                 onClick={() => setRiskThreshold(r)}
                 style={{
                   padding: '7px 16px', borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600,
-                  border: `1px solid ${riskThreshold === r ? (r === 'LOW' ? '#10b981' : r === 'MEDIUM' ? '#f59e0b' : '#ef4444') : '#1e293b'}`,
+                  border: `1px solid ${riskThreshold === r
+                    ? (r === 'LOW' ? '#10b981' : r === 'MEDIUM' ? '#f59e0b' : '#ef4444')
+                    : '#1e293b'}`,
                   background: riskThreshold === r
                     ? (r === 'LOW' ? 'rgba(16,185,129,0.12)' : r === 'MEDIUM' ? 'rgba(245,158,11,0.12)' : 'rgba(239,68,68,0.12)')
                     : 'transparent',
@@ -89,7 +100,37 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        {/* Danger zone */}
+        {/* Theme toggle */}
+        <div style={{ background: '#0a0f1e', border: '1px solid #1e293b', borderRadius: 10, padding: 20 }}>
+          <div style={{ color: '#e2e8f0', fontSize: 14, fontWeight: 500, marginBottom: 4 }}>
+            Appearance
+          </div>
+          <div style={{ color: '#475569', fontSize: 12, marginBottom: 12 }}>
+            Choose your preferred colour scheme
+          </div>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {['dark', 'light'].map(t => (
+              <button
+                key={t}
+                onClick={() => {
+                  setTheme(t)
+                  // Preview immediately on click
+                  document.documentElement.setAttribute('data-theme', t)
+                }}
+                style={{
+                  padding: '7px 20px', borderRadius: 7, cursor: 'pointer', fontSize: 12, fontWeight: 600,
+                  border: `1px solid ${theme === t ? '#6366f1' : '#1e293b'}`,
+                  background: theme === t ? 'rgba(99,102,241,0.12)' : 'transparent',
+                  color: theme === t ? '#818cf8' : '#475569',
+                }}
+              >
+                {t === 'dark' ? '🌙 Dark' : '☀️ Light'}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Danger zone / account info */}
         <div style={{ background: '#0a0f1e', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 10, padding: 20 }}>
           <div style={{ color: '#ef4444', fontSize: 12, fontWeight: 600, letterSpacing: '0.05em', marginBottom: 8 }}>
             ACCOUNT

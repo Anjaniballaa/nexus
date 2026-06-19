@@ -35,6 +35,21 @@ export default function HistoryPage() {
     return true
   })
 
+  const downloadReport = async (e, analysisId) => {
+    e.stopPropagation()
+    try {
+      const res = await api.get(`/analysis/${analysisId}/report`, { responseType: 'blob' })
+      const url = URL.createObjectURL(res.data)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `nexus-report-${analysisId.slice(0, 8)}.md`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      toast.error('Report download failed')
+    }
+  }
+
   return (
     <div style={{ padding: '24px 32px', maxWidth: 960, margin: '0 auto' }}>
       <div style={{ marginBottom: 24 }}>
@@ -50,13 +65,15 @@ export default function HistoryPage() {
           placeholder="Search by name..."
           style={{
             padding: '8px 12px', borderRadius: 8, background: '#0a0f1e',
-            border: '1px solid #1e293b', color: '#e2e8f0', fontSize: 12, outline: 'none', flex: 1, minWidth: 160,
+            border: '1px solid #1e293b', color: '#e2e8f0', fontSize: 12,
+            outline: 'none', flex: 1, minWidth: 160,
           }}
         />
         {languages.length > 0 && (
           <select value={filterLang} onChange={e => setFilterLang(e.target.value)} style={{
             padding: '8px 10px', borderRadius: 8, background: '#0a0f1e',
-            border: '1px solid #1e293b', color: filterLang ? '#e2e8f0' : '#475569', fontSize: 12, outline: 'none',
+            border: '1px solid #1e293b', color: filterLang ? '#e2e8f0' : '#475569',
+            fontSize: 12, outline: 'none',
           }}>
             <option value="">All languages</option>
             {languages.map(l => <option key={l} value={l}>{l}</option>)}
@@ -64,7 +81,8 @@ export default function HistoryPage() {
         )}
         <select value={filterRisk} onChange={e => setFilterRisk(e.target.value)} style={{
           padding: '8px 10px', borderRadius: 8, background: '#0a0f1e',
-          border: '1px solid #1e293b', color: filterRisk ? '#e2e8f0' : '#475569', fontSize: 12, outline: 'none',
+          border: '1px solid #1e293b', color: filterRisk ? '#e2e8f0' : '#475569',
+          fontSize: 12, outline: 'none',
         }}>
           <option value="">All risk</option>
           <option value="LOW">LOW</option>
@@ -73,7 +91,8 @@ export default function HistoryPage() {
         </select>
         <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{
           padding: '8px 10px', borderRadius: 8, background: '#0a0f1e',
-          border: '1px solid #1e293b', color: filterStatus ? '#e2e8f0' : '#475569', fontSize: 12, outline: 'none',
+          border: '1px solid #1e293b', color: filterStatus ? '#e2e8f0' : '#475569',
+          fontSize: 12, outline: 'none',
         }}>
           <option value="">All status</option>
           <option value="complete">Complete</option>
@@ -82,7 +101,6 @@ export default function HistoryPage() {
         </select>
       </div>
 
-      {/* Results count */}
       <div style={{ color: '#334155', fontSize: 11, marginBottom: 10 }}>
         {filtered.length} of {analyses.length} analyses
       </div>
@@ -113,7 +131,6 @@ export default function HistoryPage() {
                 onMouseEnter={e => e.currentTarget.style.borderColor = '#334155'}
                 onMouseLeave={e => e.currentTarget.style.borderColor = '#1e293b'}
               >
-                {/* Main info */}
                 <div style={{ flex: 1, minWidth: 200 }}>
                   <div style={{ color: '#e2e8f0', fontSize: 13, fontWeight: 500, marginBottom: 3 }}>
                     {a.source_name}
@@ -122,57 +139,42 @@ export default function HistoryPage() {
                     {a.language && <span>{a.language}{a.era ? ` (${a.era})` : ''}</span>}
                     <span>{a.total_issues || 0} issues</span>
                     {a.estimated_hours_saved != null && (
-                      <span style={{ color: '#10b981' }}>~{a.estimated_hours_saved.toFixed(1)}h saved</span>
+                      <span style={{ color: '#10b981' }}>~{Number(a.estimated_hours_saved).toFixed(1)}h saved</span>
                     )}
                   </div>
                 </div>
 
-                {/* Risk */}
                 {risk && (
                   <span style={{
-                    ...risk, padding: '3px 10px', borderRadius: 5, fontSize: 10, fontWeight: 700,
+                    ...risk, padding: '3px 10px', borderRadius: 5,
+                    fontSize: 10, fontWeight: 700,
                   }}>{a.overall_risk}</span>
                 )}
 
-                {/* Status */}
                 <span style={{
                   padding: '3px 10px', borderRadius: 5, fontSize: 11, fontWeight: 600,
-                  background: a.status === 'complete' ? 'rgba(16,185,129,0.1)' : a.status === 'running' ? 'rgba(99,102,241,0.1)' : 'rgba(71,85,105,0.1)',
+                  background: a.status === 'complete'
+                    ? 'rgba(16,185,129,0.1)' : a.status === 'running'
+                    ? 'rgba(99,102,241,0.1)' : 'rgba(71,85,105,0.1)',
                   color: a.status === 'complete' ? '#10b981' : a.status === 'running' ? '#818cf8' : '#64748b',
                 }}>{a.status}</span>
 
-                {/* Date */}
+                {/* FIX: single date span (was duplicated) */}
                 <span style={{ color: '#334155', fontSize: 11 }}>
-                  {new Date(a.created_at).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}
+                  {new Date(a.created_at).toLocaleDateString('en', {
+                    month: 'short', day: 'numeric', year: 'numeric',
+                  })}
                 </span>
-                <span style={{ color: '#334155', fontSize: 11 }}>
-  {new Date(a.created_at).toLocaleDateString('en', { month: 'short', day: 'numeric', year: 'numeric' })}
-</span>
 
-<button
-  onClick={async (e) => {
-    e.stopPropagation()
-    try {
-      const res = await api.get(`/analysis/${a.id}/report`, { responseType: 'blob' })
-      const url = URL.createObjectURL(res.data)
-      const anchor = document.createElement('a')
-      anchor.href = url
-      anchor.download = `nexus-report-${a.id.slice(0, 8)}.md`
-      anchor.click()
-      URL.revokeObjectURL(url)
-    } catch {
-      toast.error('Report download failed')
-    }
-  }}
-  style={{
-    padding: '4px 10px', borderRadius: 5,
-    border: '1px solid #334155',
-    background: 'transparent', color: '#64748b',
-    fontSize: 11, cursor: 'pointer', flexShrink: 0,
-  }}
->
-  📄 Report
-</button>
+                <button
+                  onClick={(e) => downloadReport(e, a.id)}
+                  style={{
+                    padding: '4px 10px', borderRadius: 5,
+                    border: '1px solid #334155',
+                    background: 'transparent', color: '#64748b',
+                    fontSize: 11, cursor: 'pointer', flexShrink: 0,
+                  }}
+                >📄 Report</button>
               </div>
             )
           })}

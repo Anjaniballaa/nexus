@@ -47,5 +47,22 @@
     {"legacy": "has_key?", "modern": "key?", "pattern": "hash_has_key"},
     {"legacy": "Array.new.each", "modern": "[].each", "pattern": "array_literal"},
     {"legacy": "lambda {|x|", "modern": "->(x) {", "pattern": "lambda_syntax"}
+  ],
+  "rust": [
+    {"legacy": "try!(", "modern": "?", "pattern": "try_macro"},
+    {"legacy": "Box::new(", "modern": "Box::new(", "pattern": "heap_allocation"}
+  ],
+  "cpp": [
+    {"legacy": "NULL", "modern": "nullptr", "pattern": "null_pointer"},
+    {"legacy": "auto_ptr<", "modern": "unique_ptr<", "pattern": "smart_pointer"},
+    {"legacy": "printf(", "modern": "std::cout <<", "pattern": "printf_to_cout"}
+  ],
+  "csharp": [
+    {"legacy": "ArrayList ", "modern": "List<object> ", "pattern": "generic_collections"},
+    {"legacy": "String.Format(", "modern": "$\"", "pattern": "string_interpolation"}
+  ],
+  "php": [
+    {"legacy": "mysql_query(", "modern": "PDO->query(", "pattern": "mysql_deprecated"},
+    {"legacy": "ereg(", "modern": "preg_match(", "pattern": "ereg_deprecated"}
   ]
 }
