@@ -34,7 +34,25 @@ def validate_modified_file(
             "issues": ["tree-sitter unavailable — validation skipped"],
         }
 
-    modified_ast = parse_file(language, modified_content)
+    # FIX: parse_file()'s real signature is
+    #   parse_file(file_path, language_name, content=None, era=None)
+    # The old call here was `parse_file(language, modified_content)`,
+    # which passed `language` ("Python") into the file_path slot and the
+    # actual source code into the language_name slot. Since the source
+    # code string is never a key in TREE_SITTER_SUPPORTED, parse_file()
+    # silently fell through to the LLM fallback path with a garbage
+    # "file" (the 4-character language name) and a multi-hundred-line
+    # string sitting in the file_path slot — producing an empty/garbage
+    # AST with no functions detected. That's why every modernization run
+    # reported "Functions removed from modified file: __init__,
+    # validate_user, create_user" even when the actual modified file was
+    # perfectly valid Python.
+    #
+    # We now pass a placeholder file_path (only used for extension-based
+    # fallback hints and error messages, not for reading from disk, since
+    # `content` is provided), the real language name, and the real
+    # modified source.
+    modified_ast = parse_file("modified_file.py", language.lower(), modified_content, None)
     issues = []
 
     # ── Check 1: AST is valid (no syntax errors) ──────────────────────────────
