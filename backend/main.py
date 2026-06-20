@@ -834,8 +834,11 @@ async def _run_analysis_bg(
             # Get report data — try nested "report" key first, fall back to full dict
             report_data = analysis.full_report.get("report") or analysis.full_report
 
+            # Build the real link to the analysis page on the frontend
+            report_url = f"{settings.FRONTEND_URL}/analysis/{analysis_id}"
+
             try:
-                html = build_html_email(report_data, user.name, analysis.source_name)
+                html = build_html_email(report_data, user.name, analysis.source_name, report_url)
             except Exception as e:
                 logger.error("email_html_build_failed", analysis_id=analysis_id, error=str(e))
                 return

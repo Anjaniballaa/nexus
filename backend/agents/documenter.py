@@ -285,8 +285,13 @@ def _parse_json_response(raw: str) -> Optional[Dict]:
     return None
 
 
-def build_html_email(report: Dict, user_name: str, source_name: str) -> str:
-    """Build a professional HTML email from the report data."""
+def build_html_email(report: Dict, user_name: str, source_name: str, report_url: str = "#") -> str:
+    """Build a professional HTML email from the report data.
+
+    report_url should be the full frontend URL to the analysis page, e.g.
+    https://nexus-2-7dg3.onrender.com/analysis/<analysis_id>
+    Defaults to "#" for backward compatibility if not provided.
+    """
     risk_color = {"LOW": "#22c55e", "MEDIUM": "#f59e0b", "HIGH": "#ef4444"}.get(
         report.get("overall_risk", "MEDIUM"), "#6b7280"
     )
@@ -313,7 +318,7 @@ def build_html_email(report: Dict, user_name: str, source_name: str) -> str:
         </div>
         <!-- CTA -->
         <div style="text-align:center;margin:32px 0">
-          <a href="#" style="display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:600;font-size:15px">View Full Report →</a>
+          <a href="{report_url}" style="display:inline-block;background:#6366f1;color:#fff;text-decoration:none;padding:14px 32px;border-radius:8px;font-weight:600;font-size:15px">View Full Report →</a>
         </div>
         <!-- Footer -->
         <p style="margin:0;font-size:12px;color:#475569;text-align:center">NEXUS by Team Algerithm · Capgemini ExcellEr AgentifAI Buildathon 2026</p>
