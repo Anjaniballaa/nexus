@@ -130,28 +130,56 @@ def _run_detect_secrets(file_path: str) -> List[Dict]:
 
 
 def _run_radon_cc(file_path: str) -> Dict:
-    """Radon cyclomatic complexity."""
+    """
+    Radon cyclomatic complexity.
+
+    FIX: Radon's JSON output is a dict keyed by filename, where each value is
+    a LIST of result entries. Each entry is normally a dict describing a
+    function/method/class — BUT Radon also emits non-dict entries in some
+    versions/cases (e.g. a bare complexity-rank string, or an entry for a
+    file-level parse error). The old code assumed every entry was a dict and
+    called `.get()` on it unconditionally, which threw
+    "'str' object has no attribute 'get'" whenever a non-dict entry appeared.
+    Also dropped the `-s` (show rank) flag since it isn't used downstream and
+    isn't needed for the plain complexity number.
+    """
     try:
         result = subprocess.run(
-            ["radon", "cc", file_path, "-j", "-s"],
+            ["radon", "cc", file_path, "-j"],
             capture_output=True, text=True, timeout=30
         )
         if not result.stdout.strip():
             return {}
         data = json.loads(result.stdout)
+
         complexities = []
         for file_results in data.values():
+            # file_results should be a list; guard in case Radon returns
+            # something else (e.g. an error string) for this file.
+            if not isinstance(file_results, list):
+                continue
             for func in file_results:
-                complexities.append(func.get("complexity", 1))
+                # Only process dict entries — skip strings/other types
+                # that Radon sometimes includes (e.g. rank markers).
+                if not isinstance(func, dict):
+                    continue
+                complexity_val = func.get("complexity")
+                if isinstance(complexity_val, (int, float)):
+                    complexities.append(complexity_val)
+
         if not complexities:
             return {}
+
         avg = sum(complexities) / len(complexities)
         return {
             "avg_cyclomatic": round(avg, 2),
             "max_cyclomatic": max(complexities),
             "functions_analyzed": len(complexities),
         }
-    except (FileNotFoundError, Exception) as e:
+    except FileNotFoundError:
+        logger.warning("radon_not_installed")
+        return {}
+    except Exception as e:
         logger.warning("radon_cc_unavailable", error=str(e))
         return {}
 
@@ -167,9 +195,10 @@ def _run_radon_mi(file_path: str) -> float | None:
             return None
         data = json.loads(result.stdout)
         for v in data.values():
-            return round(v.get("mi", 0), 2)
-    except Exception:
-        pass
+            if isinstance(v, dict):
+                return round(v.get("mi", 0), 2)
+    except Exception as e:
+        logger.warning("radon_mi_unavailable", error=str(e))
     return None
 
 
