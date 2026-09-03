@@ -120,7 +120,7 @@ Write the full report. Include:
 
     try:
         response = _get_client().chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openai/gpt-oss-120b",
             messages=[
                 {"role": "system", "content": DOCUMENTER_SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
