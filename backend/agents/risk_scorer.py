@@ -98,7 +98,7 @@ Score each change's risk based on the evidence above."""
     for attempt in range(settings.LLM_MAX_RETRIES + 1):
         try:
             response = _get_client().chat.completions.create(
-                model="openai/gpt-oss-120b"
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": RISK_SCORER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
