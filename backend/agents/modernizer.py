@@ -152,7 +152,7 @@ Generate the minimal fix for each issue. old_code must be copied EXACTLY from th
     for attempt in range(settings.LLM_MAX_RETRIES + 1):
         try:
             response = _get_client().chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="openai/gpt-oss-120b",
                 messages=[
                     {"role": "system", "content": MODERNIZER_SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
